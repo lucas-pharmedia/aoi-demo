@@ -1,0 +1,20 @@
+{
+  "name": "aoi-client",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "phaser": "^3.87.0",
+    "phaser-navmesh": "^2.3.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vite": "^6.0.0"
+  }
+}
