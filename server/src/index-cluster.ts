@@ -49,6 +49,8 @@ if (cluster.isPrimary) {
   /** 是否有 worker 狀態變動（變動才廣播） */
   let stateDirty = false;
   let masterTick = 0;
+  let masterBroadcastSum = 0;
+  let masterBroadcastCount = 0;
 
   for (let i = 0; i < numCPUs; i++) {
     cluster.fork();
@@ -71,6 +73,7 @@ if (cluster.isPrimary) {
     if (!stateDirty) return;
     stateDirty = false;
 
+    const bcastStart = Date.now();
     const all: WorkerPlayerState[] = [];
     for (const states of workerStates.values()) {
       for (const s of states) all.push(s);
@@ -85,6 +88,23 @@ if (cluster.isPrimary) {
           // worker 剛斷線，忽略
         }
       }
+    }
+    const bcastMs = Date.now() - bcastStart;
+    masterBroadcastSum += bcastMs;
+    masterBroadcastCount++;
+    if (bcastMs > 80) {
+      console.log(`[Master] spike broadcast=${bcastMs}ms total=${all.length}`);
+    }
+    if (masterTick % 180 === 0) {
+      const avg =
+        masterBroadcastCount > 0
+          ? (masterBroadcastSum / masterBroadcastCount).toFixed(1)
+          : "0";
+      console.log(
+        `[Master] tick avgBroadcast=${avg}ms total=${all.length}`
+      );
+      masterBroadcastSum = 0;
+      masterBroadcastCount = 0;
     }
   }, TICK_MS);
 
@@ -226,6 +246,11 @@ if (cluster.isPrimary) {
     const now = Date.now();
     const interval = now - lastTickTime;
     lastTickTime = now;
+    if (interval > 80) {
+      console.log(
+        `[Worker ${workerId}] spike interval=${interval}ms local=${localPlayers.size} global=${allPlayersCache.size + localPlayers.size}`
+      );
+    }
     const computeStart = now;
     tick++;
     tickIntervalSum += interval;

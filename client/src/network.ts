@@ -12,6 +12,8 @@ let ws: WebSocket | null = null;
 let handlers: Handlers | null = null;
 let retryTimer: number | null = null;
 let lastPacketAt: number | null = null;
+let gapWindowStart = 0;
+let gapBuckets = { g60: 0, g100: 0, g200: 0 };
 
 export function connect(url: string, h: Handlers): void {
   handlers = h;
@@ -26,10 +28,24 @@ export function connect(url: string, h: Handlers): void {
     const now = performance.now();
     if (lastPacketAt !== null) {
       const gap = now - lastPacketAt;
-      // 超過 buffer 深度（100ms）→ 會造成畫面凍結
-      if (gap > 100) console.log(`[PACKET] gap ${gap.toFixed(0)}ms`);
+      if (gap > 200) {
+        gapBuckets.g200++;
+        console.log(`[PACKET] gap ${gap.toFixed(0)}ms`);
+      } else if (gap > 100) {
+        gapBuckets.g100++;
+      } else if (gap > 60) {
+        gapBuckets.g60++;
+      }
     }
     lastPacketAt = now;
+    if (gapWindowStart === 0) gapWindowStart = now;
+    if (now - gapWindowStart >= 5000) {
+      console.log(
+        `[PACKET] 5s 摘要 60-100=${gapBuckets.g60} 100-200=${gapBuckets.g100} >200=${gapBuckets.g200}`
+      );
+      gapBuckets = { g60: 0, g100: 0, g200: 0 };
+      gapWindowStart = now;
+    }
     const msg = JSON.parse(ev.data) as ServerPacket;
     switch (msg.type) {
       case 'init':

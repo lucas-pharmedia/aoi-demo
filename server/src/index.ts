@@ -135,6 +135,9 @@ setInterval(() => {
   const now = Date.now();
   const interval = now - lastTickTime;
   lastTickTime = now;
+  if (interval > 80) {
+    console.log(`[Single] spike interval=${interval}ms total=${players.size}`);
+  }
   const computeStart = now;
   tick++;
   tickIntervalSum += interval;
