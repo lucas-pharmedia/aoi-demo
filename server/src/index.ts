@@ -21,7 +21,7 @@ const PORT = 8088;
 const TICK_MS = 16;
 const MOVE_THRESHOLD = 1;
 const SNAPSHOT_TICKS = 60;
-const MAX_AOI_CAP = 40;
+const MAX_AOI_CAP = 50;
 
 interface ConnectedPlayer extends PlayerState {
   ws: WebSocket;

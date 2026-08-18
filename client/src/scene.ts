@@ -31,17 +31,17 @@ import type { PlayerState, ServerPacket } from './types.ts';
 interface RemotePlayer {
   sprite: Phaser.GameObjects.Sprite;
   label: Phaser.GameObjects.Text;
-  targetX: number;
-  targetY: number;
-  lastX: number;
-  lastY: number;
-  arrivalTime: number;
-  lastGap: number;
+  buffer: { t: number; x: number; y: number }[];
   lastDir: Direction;
-  prevTargetX: number;
-  prevTargetY: number;
-  lastMoveTime: number;
+  leaving: boolean;
 }
+
+/** 內插緩衝區：畫面恆渲染「now-100ms」的歷史位置，封包 16/32ms 抖動完全不影響平滑度 */
+const BUFFER_DELAY_MS = 100;
+/** 緩衝區最多留幾筆快照（60Hz * 2s） */
+const MAX_BUFFER_SNAPSHOTS = 120;
+/** 遠端進出場淡入/淡出時間 */
+const REMOTE_FADE_MS = 200;
 
 export class GameScene extends Phaser.Scene {
   mapManager!: MapManager;
@@ -129,16 +129,19 @@ export class GameScene extends Phaser.Scene {
   }
 
   private upsertRemote(p: PlayerState): void {
+    const snap = { t: this.time.now, x: p.x, y: p.y };
     const existing = this.remotes.get(p.id);
     if (existing) {
-      // 新包到達：目前位置當起點，用「實測間隔」當插值窗口（EMA 平滑抖動）
-      const gap = this.time.now - existing.arrivalTime;
-      existing.lastX = existing.sprite.x;
-      existing.lastY = existing.sprite.y;
-      existing.targetX = p.x;
-      existing.targetY = p.y;
-      existing.lastGap = existing.lastGap > 0 ? existing.lastGap * 0.7 + gap * 0.3 : gap;
-      existing.arrivalTime = this.time.now;
+      // 淡出中又收到包（AOI 邊界抖動）→ 取消淡出、拉回不透明
+      if (existing.leaving) {
+        existing.leaving = false;
+        this.tweens.killTweensOf(existing.sprite);
+        this.tweens.killTweensOf(existing.label);
+        existing.sprite.setAlpha(1);
+        existing.label.setAlpha(1);
+      }
+      existing.buffer.push(snap);
+      if (existing.buffer.length > MAX_BUFFER_SNAPSHOTS) existing.buffer.shift();
       return;
     }
     // 遠端玩家用同一張 player-sprite，縮放與本地一致；移動中由 lerp 方向播 walk 動畫
@@ -146,34 +149,41 @@ export class GameScene extends Phaser.Scene {
     const sprite = this.add
       .sprite(p.x, p.y, PLAYER_SPRITE_TEXTURE_KEY, idleFrame)
       .setScale(2)
-      .setDepth(10);
+      .setDepth(10)
+      .setAlpha(0);
     sprite.setOrigin(0.5, (WORLD_CHARACTER_SHEET_FRAME.frameHeight - 14) / WORLD_CHARACTER_SHEET_FRAME.frameHeight);
     sprite.texture.setFilter(Phaser.Textures.FilterMode.NEAREST);
     const label = this.add
       .text(p.x + 16, p.y - 8, p.id, { fontSize: '10px', color: '#8af' })
-      .setDepth(10);
+      .setDepth(10)
+      .setAlpha(0);
     this.remotes.set(p.id, {
       sprite,
       label,
-      targetX: p.x,
-      targetY: p.y,
-      lastX: p.x,
-      lastY: p.y,
-      arrivalTime: this.time.now,
-      lastGap: 0,
+      buffer: [snap],
       lastDir: 'down',
-      prevTargetX: p.x,
-      prevTargetY: p.y,
-      lastMoveTime: 0,
+      leaving: false,
     });
+    // 進場淡入
+    this.tweens.add({ targets: sprite, alpha: 1, duration: REMOTE_FADE_MS });
+    this.tweens.add({ targets: label, alpha: 1, duration: REMOTE_FADE_MS });
   }
 
   private removeRemote(id: string): void {
     const rp = this.remotes.get(id);
-    if (!rp) return;
-    rp.sprite.destroy();
-    rp.label.destroy();
-    this.remotes.delete(id);
+    if (!rp || rp.leaving) return;
+    rp.leaving = true;
+    // 出場淡出：淡完才真的 destroy + 從 map 刪除
+    this.tweens.add({
+      targets: [rp.sprite, rp.label],
+      alpha: 0,
+      duration: REMOTE_FADE_MS,
+      onComplete: () => {
+        rp.sprite.destroy();
+        rp.label.destroy();
+        this.remotes.delete(id);
+      },
+    });
   }
 
   private handleEnter(players: PlayerState[]): void {
@@ -238,33 +248,70 @@ export class GameScene extends Phaser.Scene {
   }
 
   private lerpRemotes(_delta: number): void {
-    // 用「實測送包間隔」當插值窗口：間隔短就跑快點、長就跑慢點，
-    // 避免 server tick 抖動（45~65ms）造成「走到定位後乾等」的卡頓
+    // 內插緩衝區：畫面恆渲染「now-100ms」的歷史位置，在兩個已知歷史快照間 Linear 平滑移動。
+    // 純內插、零外插——不猜未來，因此不會過衝、不會往後跳。
+    const renderTime = this.time.now - BUFFER_DELAY_MS;
     for (const rp of this.remotes.values()) {
-      const window = rp.lastGap > 0 ? rp.lastGap : 50;
-      const t = Math.min((this.time.now - rp.arrivalTime) / window, 1);
-      rp.sprite.x = Phaser.Math.Linear(rp.lastX, rp.targetX, t);
-      rp.sprite.y = Phaser.Math.Linear(rp.lastY, rp.targetY, t);
+      const buf = rp.buffer;
 
-      const tdx = rp.targetX - rp.prevTargetX;
-      const tdy = rp.targetY - rp.prevTargetY;
-      rp.prevTargetX = rp.targetX;
-      rp.prevTargetY = rp.targetY;
+      // 清掉 renderTime 之前的點（留 2 筆當錨點）
+      while (buf.length > 2 && buf[1].t < renderTime) buf.shift();
 
-      const moving = Math.hypot(tdx, tdy) > 0.5;
-      if (moving) {
-        rp.lastMoveTime = this.time.now;
-        const dir = directionFromDelta(tdx, tdy);
-        rp.lastDir = dir;
-        const animKey = walkAnimKey(PLAYER_SPRITE_TEXTURE_KEY, dir);
-        // stop() 後 currentAnim.key 仍殘留舊值，不能拿它判斷「在播」；
-        // play(key, true) 的 ignoreIfPlaying 會自己決定要不要重播
-        rp.sprite.play(animKey, true);
-      } else if (this.time.now - rp.lastMoveTime > 250 && rp.sprite.anims.isPlaying) {
-        rp.sprite.anims.stop();
-        rp.sprite.setFrame(WALK_ANIM_FRAMES[rp.lastDir].start + 1);
+      const newest = buf[buf.length - 1];
+      let x: number;
+      let y: number;
+
+      if (buf.length === 1) {
+        x = newest.x;
+        y = newest.y;
+      } else {
+        // 找包住 renderTime 的兩點 s1 <= renderTime <= s2
+        let s2i = buf.length - 1;
+        for (let i = 1; i < buf.length; i++) {
+          if (buf[i].t > renderTime) {
+            s2i = i;
+            break;
+          }
+        }
+        const s1 = buf[s2i - 1];
+        const s2 = buf[s2i];
+        const seg = s2.t - s1.t || 1;
+
+        if (renderTime <= s2.t) {
+          // 純內插：兩個已知點之間平滑移動
+          const t = Phaser.Math.Clamp((renderTime - s1.t) / seg, 0, 1);
+          x = Phaser.Math.Linear(s1.x, s2.x, t);
+          y = Phaser.Math.Linear(s1.y, s2.y, t);
+
+          // 走路動畫：用歷史快照段（s1→s2）位移算方向；沒位移立刻停
+          const tdx = s2.x - s1.x;
+          const tdy = s2.y - s1.y;
+          const moving = Math.hypot(tdx, tdy) > 0.5;
+          if (moving) {
+            const dir = directionFromDelta(tdx, tdy);
+            rp.lastDir = dir;
+            const animKey = walkAnimKey(PLAYER_SPRITE_TEXTURE_KEY, dir);
+            // stop() 後 currentAnim.key 仍殘留舊值，不能拿它判斷「在播」；
+            // play(key, true) 的 ignoreIfPlaying 會自己決定要不要重播
+            rp.sprite.play(animKey, true);
+          } else if (rp.sprite.anims.isPlaying) {
+            rp.sprite.anims.stop();
+            rp.sprite.setFrame(WALK_ANIM_FRAMES[rp.lastDir].start + 1);
+          }
+        } else {
+          // buffer 乾涸（包遲到超過緩衝深度）：停在最新已知位置，不加外插；
+          // 此時已無位移 → 動畫一併停掉，避免「站在原地走」的殘影
+          x = s2.x;
+          y = s2.y;
+          if (rp.sprite.anims.isPlaying) {
+            rp.sprite.anims.stop();
+            rp.sprite.setFrame(WALK_ANIM_FRAMES[rp.lastDir].start + 1);
+          }
+        }
       }
 
+      rp.sprite.x = x;
+      rp.sprite.y = y;
       rp.sprite.setDepth(rp.sprite.y);
       rp.label.setPosition(rp.sprite.x + 16, rp.sprite.y - 8);
       rp.label.setDepth(rp.sprite.y + 1);

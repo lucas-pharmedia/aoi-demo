@@ -37,9 +37,9 @@ function parseArgs(argv: string[]): {
     return i >= 0 ? argv[i + 1] : undefined;
   };
   return {
-    max: Number(get("max") ?? 10),
-    step: Number(get("step") ?? 10),
-    hold: Number(get("hold") ?? 5000000),
+    max: Number(get("max") ?? 500),
+    step: Number(get("step") ?? 50),
+    hold: Number(get("hold") ?? 1000),
     url: get("url") ?? "ws://localhost:8088",
   };
 }
@@ -228,7 +228,7 @@ class StressTest {
       `done. max=${total} connected=${this.connected} failed=${this.failed}`
     );
     this.log("最後一列 avgInterval > 150ms 代表該人數下 server 已開始卡。");
-    process.exit(0);
+    // process.exit(0);
   }
 
   private sleep(ms: number): Promise<void> {
