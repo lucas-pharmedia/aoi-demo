@@ -19,10 +19,31 @@
         align-items: center;
         justify-content: center;
       }
+      #fps-overlay {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        z-index: 30000;
+        pointer-events: none;
+        font-family: monospace;
+        font-size: 14px;
+        padding: 2px 4px;
+        background: #000a;
+      }
+      #fps-overlay.fps-good {
+        color: #8f8;
+      }
+      #fps-overlay.fps-mid {
+        color: #ff0;
+      }
+      #fps-overlay.fps-bad {
+        color: #f55;
+      }
     </style>
   </head>
   <body>
     <div id="game"></div>
+    <div id="fps-overlay">FPS: --</div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

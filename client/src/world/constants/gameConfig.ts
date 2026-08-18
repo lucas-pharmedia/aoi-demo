@@ -20,7 +20,7 @@ export const IDLE_BREATH = {
 } as const;
 
 export const PLAYER_CAMERA_FOLLOW_LERP = { x: 0.1, y: 0.1 } as const;
-export const PLAYER_CAMERA_ZOOM = 0.5;
+export const PLAYER_CAMERA_ZOOM = 0.3;
 
 export function walkAnimKey(textureKey: string, dir: Direction): string {
   return `${textureKey}-walk-${dir}`;

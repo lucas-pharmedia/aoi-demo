@@ -126,9 +126,19 @@ function syncView(p: ConnectedPlayer, nearby: PlayerState[]): void {
 }
 
 let tick = 0;
+let lastTickTime = Date.now();
+let tickIntervalSum = 0;
+let tickComputeSum = 0;
+let tickCount = 0;
 
 setInterval(() => {
+  const now = Date.now();
+  const interval = now - lastTickTime;
+  lastTickTime = now;
+  const computeStart = now;
   tick++;
+  tickIntervalSum += interval;
+  tickCount++;
 
   // 重建 Spatial Bucket（單 process：只有本地玩家，無跨 worker）
   const gridBuckets = new Map<string, PlayerState[]>();
@@ -169,6 +179,19 @@ setInterval(() => {
       send(p.ws, { type: "update", players: nearby });
       for (const q of nearby) p.lastKnown.set(q.id, { x: q.x, y: q.y });
     }
+  }
+  tickComputeSum += Date.now() - computeStart;
+
+  // 每 3 秒印一次 tick 體質：實際間隔 vs 計算耗時（間隔遠大於 TICK_MS = server 在卡）
+  if (tick % 180 === 0) {
+    const avgInterval = (tickIntervalSum / tickCount).toFixed(1);
+    const avgCompute = (tickComputeSum / tickCount).toFixed(1);
+    console.log(
+      `[Single] tick avgInterval=${avgInterval}ms compute=${avgCompute}ms players=${players.size}`
+    );
+    tickIntervalSum = 0;
+    tickComputeSum = 0;
+    tickCount = 0;
   }
 }, TICK_MS);
 

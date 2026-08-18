@@ -1,20 +1,20 @@
-import Phaser from 'phaser';
-import { connect, sendMove } from './network.ts';
-import { MapManager } from './world/managers/MapManager.ts';
-import { PlayerManager } from './world/managers/PlayerManager.ts';
-import { HOME_TILE_MAP_KEY } from './world/constants/mapConfig.ts';
-import { WORLD_HOME_TEXTURE_KEYS } from './world/constants/homeMapTextureKeys.ts';
+import Phaser from "phaser";
+import { connect, sendMove } from "./network.ts";
+import { MapManager } from "./world/managers/MapManager.ts";
+import { PlayerManager } from "./world/managers/PlayerManager.ts";
+import { HOME_TILE_MAP_KEY } from "./world/constants/mapConfig.ts";
+import { WORLD_HOME_TEXTURE_KEYS } from "./world/constants/homeMapTextureKeys.ts";
 import {
   PLAYER_SPRITE_TEXTURE_KEY,
   WORLD_CHARACTER_SHEET_FRAME,
   walkAnimKey,
   WALK_ANIM_FRAMES,
-} from './world/constants/gameConfig.ts';
+} from "./world/constants/gameConfig.ts";
 import {
   directionFromDelta,
   registerSpriteWalkAnimations,
-} from './world/services/spriteWalk.ts';
-import type { Direction } from './world/types/index.ts';
+} from "./world/services/spriteWalk.ts";
+import type { Direction } from "./world/types/index.ts";
 import {
   MAP_WIDTH,
   MAP_HEIGHT,
@@ -25,8 +25,9 @@ import {
   toGrid,
   gridKey,
   getSurroundingGridKeys,
-} from './constants.ts';
-import type { PlayerState, ServerPacket } from './types.ts';
+} from "./constants.ts";
+import type { PlayerState, ServerPacket } from "./types.ts";
+import { FpsOverlay } from "./ui/fps.ts";
 
 interface RemotePlayer {
   sprite: Phaser.GameObjects.Sprite;
@@ -46,23 +47,30 @@ const REMOTE_FADE_MS = 200;
 export class GameScene extends Phaser.Scene {
   mapManager!: MapManager;
   playerManager: PlayerManager | null = null;
-  private selfId = '';
+  private selfId = "";
   private aoiOverlay!: Phaser.GameObjects.Graphics;
   private remotes = new Map<string, RemotePlayer>();
   private lastSend = 0;
-  private lastGridKey = '';
+  private lastGridKey = "";
   private lastTotal = -1;
+  private fpsOverlay!: FpsOverlay;
+  private fpsFrames = 0;
+  private fpsWindowMs = 0;
 
   constructor() {
-    super('game');
+    super("game");
   }
 
   preload(): void {
-    this.load.tilemapTiledJSON(HOME_TILE_MAP_KEY, 'assets/world/home/home.tmj');
+    this.load.tilemapTiledJSON(HOME_TILE_MAP_KEY, "assets/world/home/home.tmj");
     for (const key of WORLD_HOME_TEXTURE_KEYS) {
       this.load.image(key, `assets/world/home/map-objects/${key}.png`);
     }
-    this.load.spritesheet(PLAYER_SPRITE_TEXTURE_KEY, 'assets/world/player-sprite.png', WORLD_CHARACTER_SHEET_FRAME);
+    this.load.spritesheet(
+      PLAYER_SPRITE_TEXTURE_KEY,
+      "assets/world/player-sprite.png",
+      WORLD_CHARACTER_SHEET_FRAME
+    );
   }
 
   create(): void {
@@ -76,12 +84,20 @@ export class GameScene extends Phaser.Scene {
     this.drawStaticGrid();
     // AOI 高亮蓋在地圖物件上面（前景 fg depth=20000）
     this.aoiOverlay = this.add.graphics().setDepth(25000);
+    // 右上角 fps（DOM overlay，CSS 定位，不擋遊戲點擊）
+    this.fpsOverlay = new FpsOverlay();
     // 點擊 → 障礙物走過去、空地 navmesh 尋路
-    this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => this.onPointerDown(pointer));
+    this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) =>
+      this.onPointerDown(pointer)
+    );
 
-    this.scale.on('resize', () => this.playerManager?.recenterCameraOnPlayer());
+    this.scale.on("resize", () => {
+      this.playerManager?.recenterCameraOnPlayer();
+    });
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
-      this.scale.off('resize', () => this.playerManager?.recenterCameraOnPlayer());
+      this.scale.off("resize", () =>
+        this.playerManager?.recenterCameraOnPlayer()
+      );
     });
 
     const wsUrl = `ws://${location.hostname}:8088`;
@@ -109,16 +125,16 @@ export class GameScene extends Phaser.Scene {
       for (let c = 0; c < GRID_COLS; c++) {
         this.add
           .text(c * GRID_WIDTH + 8, r * GRID_HEIGHT + 4, `${c}_${r}`, {
-            fontFamily: 'monospace',
-            fontSize: '14px',
-            color: '#667',
+            fontFamily: "monospace",
+            fontSize: "14px",
+            color: "#667",
           })
           .setDepth(1);
       }
     }
   }
 
-  private handleInit(p: Extract<ServerPacket, { type: 'init' }>): void {
+  private handleInit(p: Extract<ServerPacket, { type: "init" }>): void {
     this.selfId = p.selfId;
     // server 隨機出生可能落在攤位/牆上，PlayerManager 會拉回可行走區域
     this.playerManager?.createPlayer({ x: p.x, y: p.y });
@@ -141,7 +157,8 @@ export class GameScene extends Phaser.Scene {
         existing.label.setAlpha(1);
       }
       existing.buffer.push(snap);
-      if (existing.buffer.length > MAX_BUFFER_SNAPSHOTS) existing.buffer.shift();
+      if (existing.buffer.length > MAX_BUFFER_SNAPSHOTS)
+        existing.buffer.shift();
       return;
     }
     // 遠端玩家用同一張 player-sprite，縮放與本地一致；移動中由 lerp 方向播 walk 動畫
@@ -151,17 +168,21 @@ export class GameScene extends Phaser.Scene {
       .setScale(2)
       .setDepth(10)
       .setAlpha(0);
-    sprite.setOrigin(0.5, (WORLD_CHARACTER_SHEET_FRAME.frameHeight - 14) / WORLD_CHARACTER_SHEET_FRAME.frameHeight);
+    sprite.setOrigin(
+      0.5,
+      (WORLD_CHARACTER_SHEET_FRAME.frameHeight - 14) /
+        WORLD_CHARACTER_SHEET_FRAME.frameHeight
+    );
     sprite.texture.setFilter(Phaser.Textures.FilterMode.NEAREST);
     const label = this.add
-      .text(p.x + 16, p.y - 8, p.id, { fontSize: '10px', color: '#8af' })
+      .text(p.x + 16, p.y - 8, p.id, { fontSize: "10px", color: "#8af" })
       .setDepth(10)
       .setAlpha(0);
     this.remotes.set(p.id, {
       sprite,
       label,
       buffer: [snap],
-      lastDir: 'down',
+      lastDir: "down",
       leaving: false,
     });
     // 進場淡入
@@ -212,9 +233,14 @@ export class GameScene extends Phaser.Scene {
     const world = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
 
     // 點到障礙物 → 走到其外接矩形底邊中心
-    const obstacle = this.mapManager.findObstacleObjectAtWorld(world.x, world.y);
+    const obstacle = this.mapManager.findObstacleObjectAtWorld(
+      world.x,
+      world.y
+    );
     if (obstacle) {
-      this.playerManager?.walkToPoint(this.mapManager.getObstacleApproachPoint(obstacle));
+      this.playerManager?.walkToPoint(
+        this.mapManager.getObstacleApproachPoint(obstacle)
+      );
       return;
     }
 
@@ -319,6 +345,23 @@ export class GameScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number): void {
+    // 單幀卡頓偵測：>50ms = 主執行緒卡住（<1000ms 排除分頁切回）
+    if (delta > 50 && delta < 1000) {
+      console.log(`[FRAME] hitched ${delta.toFixed(0)}ms`);
+    }
+
+    // 右上角 fps：真實每秒幀數，1 秒視窗算完才顯示，不做 EMA 平滑
+    this.fpsFrames++;
+    // 排除分頁切回的巨量 delta，避免污染當秒真實值
+    this.fpsWindowMs += Math.min(delta, 1000);
+    if (this.fpsWindowMs >= 1000) {
+      this.fpsOverlay.set(
+        Math.round((this.fpsFrames * 1000) / this.fpsWindowMs)
+      );
+      this.fpsFrames = 0;
+      this.fpsWindowMs = 0;
+    }
+
     this.playerManager?.tick();
     this.lerpRemotes(delta);
     this.drawAoi();
@@ -328,7 +371,9 @@ export class GameScene extends Phaser.Scene {
       const total = 1 + this.remotes.size;
       if (total !== this.lastTotal) {
         this.lastTotal = total;
-        console.log(`[AOI] 地圖上人數: ${total} (自己 1 + 遠端 ${this.remotes.size})`);
+        console.log(
+          `[AOI] 地圖上人數: ${total} (自己 1 + 遠端 ${this.remotes.size})`
+        );
       }
     }
 

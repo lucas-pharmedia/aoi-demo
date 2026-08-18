@@ -11,6 +11,7 @@ interface Handlers {
 let ws: WebSocket | null = null;
 let handlers: Handlers | null = null;
 let retryTimer: number | null = null;
+let lastPacketAt: number | null = null;
 
 export function connect(url: string, h: Handlers): void {
   handlers = h;
@@ -22,6 +23,13 @@ export function connect(url: string, h: Handlers): void {
 
   ws.onmessage = (ev) => {
     if (!handlers) return;
+    const now = performance.now();
+    if (lastPacketAt !== null) {
+      const gap = now - lastPacketAt;
+      // 超過 buffer 深度（100ms）→ 會造成畫面凍結
+      if (gap > 100) console.log(`[PACKET] gap ${gap.toFixed(0)}ms`);
+    }
+    lastPacketAt = now;
     const msg = JSON.parse(ev.data) as ServerPacket;
     switch (msg.type) {
       case 'init':

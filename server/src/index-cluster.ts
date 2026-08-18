@@ -27,7 +27,7 @@ const PORT = 8088;
 const TICK_MS = 16;
 const MOVE_THRESHOLD = 1;
 const SNAPSHOT_TICKS = 60;
-const MAX_AOI_CAP = 40;
+const MAX_AOI_CAP = 10;
 /** 跨 worker 狀態同步頻率：每 N tick 一次（1 = 20Hz，跟 AOI tick 同頻）。 */
 const SYNC_EVERY_TICKS = 1;
 
@@ -217,9 +217,19 @@ if (cluster.isPrimary) {
   }
 
   let tick = 0;
+  let lastTickTime = Date.now();
+  let tickIntervalSum = 0;
+  let tickComputeSum = 0;
+  let tickCount = 0;
 
   setInterval(() => {
+    const now = Date.now();
+    const interval = now - lastTickTime;
+    lastTickTime = now;
+    const computeStart = now;
     tick++;
+    tickIntervalSum += interval;
+    tickCount++;
 
     // 1. 節流上傳自己的玩家狀態給 master（每 SYNC_EVERY_TICKS tick 一次）
     if (tick % SYNC_EVERY_TICKS === 0) {
@@ -278,6 +288,19 @@ if (cluster.isPrimary) {
         send(p.ws, { type: "update", players: nearby });
         for (const q of nearby) p.lastKnown.set(q.id, { x: q.x, y: q.y });
       }
+    }
+    tickComputeSum += Date.now() - computeStart;
+
+    // 每 3 秒印一次 tick 體質（間隔遠大於 TICK_MS = server 在卡）
+    if (tick % 180 === 0) {
+      const avgInterval = (tickIntervalSum / tickCount).toFixed(1);
+      const avgCompute = (tickComputeSum / tickCount).toFixed(1);
+      console.log(
+        `[Worker ${workerId}] tick avgInterval=${avgInterval}ms compute=${avgCompute}ms local=${localPlayers.size}`
+      );
+      tickIntervalSum = 0;
+      tickComputeSum = 0;
+      tickCount = 0;
     }
   }, TICK_MS);
 
