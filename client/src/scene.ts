@@ -33,6 +33,10 @@ interface RemotePlayer {
   label: Phaser.GameObjects.Text;
   targetX: number;
   targetY: number;
+  lastX: number;
+  lastY: number;
+  arrivalTime: number;
+  lastGap: number;
   lastDir: Direction;
   prevTargetX: number;
   prevTargetY: number;
@@ -47,6 +51,7 @@ export class GameScene extends Phaser.Scene {
   private remotes = new Map<string, RemotePlayer>();
   private lastSend = 0;
   private lastGridKey = '';
+  private lastTotal = -1;
 
   constructor() {
     super('game');
@@ -126,8 +131,14 @@ export class GameScene extends Phaser.Scene {
   private upsertRemote(p: PlayerState): void {
     const existing = this.remotes.get(p.id);
     if (existing) {
+      // 新包到達：目前位置當起點，用「實測間隔」當插值窗口（EMA 平滑抖動）
+      const gap = this.time.now - existing.arrivalTime;
+      existing.lastX = existing.sprite.x;
+      existing.lastY = existing.sprite.y;
       existing.targetX = p.x;
       existing.targetY = p.y;
+      existing.lastGap = existing.lastGap > 0 ? existing.lastGap * 0.7 + gap * 0.3 : gap;
+      existing.arrivalTime = this.time.now;
       return;
     }
     // 遠端玩家用同一張 player-sprite，縮放與本地一致；移動中由 lerp 方向播 walk 動畫
@@ -146,6 +157,10 @@ export class GameScene extends Phaser.Scene {
       label,
       targetX: p.x,
       targetY: p.y,
+      lastX: p.x,
+      lastY: p.y,
+      arrivalTime: this.time.now,
+      lastGap: 0,
       lastDir: 'down',
       prevTargetX: p.x,
       prevTargetY: p.y,
@@ -222,14 +237,14 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private lerpRemotes(): void {
-    const lerp = 0.25;
-    // server 每 50ms 才來一包新座標，中間空幀 target 不動；
-    // 用 250ms 鎖存：target 一動就記時間，期間都算「在走」，避免動畫被空幀切掉
-    const moveLatchMs = 250;
+  private lerpRemotes(_delta: number): void {
+    // 用「實測送包間隔」當插值窗口：間隔短就跑快點、長就跑慢點，
+    // 避免 server tick 抖動（45~65ms）造成「走到定位後乾等」的卡頓
     for (const rp of this.remotes.values()) {
-      rp.sprite.x += (rp.targetX - rp.sprite.x) * lerp;
-      rp.sprite.y += (rp.targetY - rp.sprite.y) * lerp;
+      const window = rp.lastGap > 0 ? rp.lastGap : 50;
+      const t = Math.min((this.time.now - rp.arrivalTime) / window, 1);
+      rp.sprite.x = Phaser.Math.Linear(rp.lastX, rp.targetX, t);
+      rp.sprite.y = Phaser.Math.Linear(rp.lastY, rp.targetY, t);
 
       const tdx = rp.targetX - rp.prevTargetX;
       const tdy = rp.targetY - rp.prevTargetY;
@@ -245,7 +260,7 @@ export class GameScene extends Phaser.Scene {
         // stop() 後 currentAnim.key 仍殘留舊值，不能拿它判斷「在播」；
         // play(key, true) 的 ignoreIfPlaying 會自己決定要不要重播
         rp.sprite.play(animKey, true);
-      } else if (this.time.now - rp.lastMoveTime > moveLatchMs && rp.sprite.anims.isPlaying) {
+      } else if (this.time.now - rp.lastMoveTime > 250 && rp.sprite.anims.isPlaying) {
         rp.sprite.anims.stop();
         rp.sprite.setFrame(WALK_ANIM_FRAMES[rp.lastDir].start + 1);
       }
@@ -258,14 +273,23 @@ export class GameScene extends Phaser.Scene {
 
   update(_time: number, delta: number): void {
     this.playerManager?.tick();
-    this.lerpRemotes();
+    this.lerpRemotes(delta);
     this.drawAoi();
+
+    // 人數 log：自己 + 視野內遠端（人數有變才印）
+    if (this.playerManager?.getPlayer()) {
+      const total = 1 + this.remotes.size;
+      if (total !== this.lastTotal) {
+        this.lastTotal = total;
+        console.log(`[AOI] 地圖上人數: ${total} (自己 1 + 遠端 ${this.remotes.size})`);
+      }
+    }
 
     // 玩家行走中（鍵盤／navmesh 路徑）→ 節流發送位置
     const player = this.playerManager?.getPlayer();
     if (player && (player.keyboardMoveActive || player.isPathMoving)) {
       const now = this.time.now;
-      if (now - this.lastSend >= 50) {
+      if (now - this.lastSend >= 16) {
         sendMove(player.sprite.x, player.sprite.y);
         this.lastSend = now;
       }

@@ -37,9 +37,9 @@ function parseArgs(argv: string[]): {
     return i >= 0 ? argv[i + 1] : undefined;
   };
   return {
-    max: Number(get("max") ?? 3000),
-    step: Number(get("step") ?? 3000),
-    hold: Number(get("hold") ?? 500000),
+    max: Number(get("max") ?? 10),
+    step: Number(get("step") ?? 10),
+    hold: Number(get("hold") ?? 5000000),
     url: get("url") ?? "ws://localhost:8088",
   };
 }
@@ -153,7 +153,7 @@ class StressTest {
 
   private pickRandomDir(bot: Bot): void {
     const angle = Math.random() * Math.PI * 2;
-    const speed = 400;
+    const speed = 200;
     bot.vx = Math.cos(angle) * speed;
     bot.vy = Math.sin(angle) * speed;
     // 0.5~1.5 秒後換方向（模擬真人走走停停換向）

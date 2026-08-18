@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:cluster": "tsx watch src/index-cluster.ts",
     "typecheck": "tsc --noEmit",
     "stress": "tsx scripts/stress-test.ts"
   },

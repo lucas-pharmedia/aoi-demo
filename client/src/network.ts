@@ -39,6 +39,11 @@ export function connect(url: string, h: Handlers): void {
       case 'update':
         handlers.onUpdate(msg.players);
         break;
+      case 'sync':
+        if (msg.enters.length) handlers.onEnter(msg.enters);
+        if (msg.leaves.length) handlers.onLeave(msg.leaves);
+        if (msg.moves.length) handlers.onMove(msg.moves);
+        break;
     }
   };
 

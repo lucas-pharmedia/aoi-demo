@@ -9,6 +9,7 @@ export type ServerPacket =
   | { type: 'enter'; players: PlayerState[] }
   | { type: 'leave'; players: string[] }
   | { type: 'move'; players: PlayerState[] }
-  | { type: 'update'; players: PlayerState[] };
+  | { type: 'update'; players: PlayerState[] }
+  | { type: 'sync'; enters: PlayerState[]; leaves: string[]; moves: PlayerState[] };
 
 export type ClientPacket = { type: 'move'; x: number; y: number };

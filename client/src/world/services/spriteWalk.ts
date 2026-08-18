@@ -2,9 +2,10 @@ import { WALK_ANIM_FRAMES, walkAnimKey } from '../constants/gameConfig';
 import type { Direction } from '../types';
 
 export function directionFromDelta(dx: number, dy: number): Direction {
-  if (Math.abs(dx) > Math.abs(dy)) {
-    return dx > 0 ? 'right' : 'left';
-  }
+  const ax = Math.abs(dx);
+  const ay = Math.abs(dy);
+  // 斜走優先上下：只有水平明顯主導 (ax > ay*1.5) 才面向左右
+  if (ax > ay * 1.5) return dx > 0 ? 'right' : 'left';
   return dy > 0 ? 'down' : 'up';
 }
 
