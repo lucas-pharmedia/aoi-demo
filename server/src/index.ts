@@ -14,6 +14,7 @@ import {
   toGrid,
   gridKey,
   getSurroundingGridKeys,
+  nearest,
 } from "./grid.ts";
 import type { PlayerState, ServerPacket, ClientPacket } from "./types.ts";
 
@@ -213,14 +214,7 @@ setInterval(() => {
       }
     }
 
-    if (nearby.length > MAX_AOI_CAP) {
-      nearby.sort((a, b) => {
-        const distA = Math.hypot(a.x - p.x, a.y - p.y);
-        const distB = Math.hypot(b.x - p.x, b.y - p.y);
-        return distA - distB;
-      });
-      nearby = nearby.slice(0, MAX_AOI_CAP);
-    }
+    nearby = nearest(p.x, p.y, nearby, MAX_AOI_CAP);
 
     syncView(p, nearby);
 

@@ -61,3 +61,26 @@ export function getSurroundingGridKeys(gx: number, gy: number): string[] {
   }
   return keys;
 }
+
+/**
+ * 從候選清單選出離 (px, py) 最近的 cap 個玩家。
+ * 用插入式部分排序（維持長度 cap 的有序陣列），避免全量 sort。
+ * 用平方距離避免 Math.hypot 的開根號成本。
+ */
+export function nearest<T extends { id: string; x: number; y: number }>(
+  px: number,
+  py: number,
+  items: T[],
+  cap: number
+): T[] {
+  if (items.length <= cap) return items;
+  const keep: { item: T; d: number }[] = [];
+  for (const item of items) {
+    const d = (item.x - px) ** 2 + (item.y - py) ** 2;
+    let i = 0;
+    while (i < keep.length && keep[i].d <= d) i++;
+    keep.splice(i, 0, { item, d });
+    if (keep.length > cap) keep.pop();
+  }
+  return keep.map((k) => k.item);
+}
