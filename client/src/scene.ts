@@ -54,8 +54,6 @@ export class GameScene extends Phaser.Scene {
   private lastGridKey = "";
   private lastTotal = -1;
   private fpsOverlay!: FpsOverlay;
-  private fpsCountLow60 = 0;
-  private fpsCountLow50 = 0;
 
   constructor() {
     super("game");
@@ -352,17 +350,7 @@ export class GameScene extends Phaser.Scene {
 
     // 右上角 fps：每幀純 raw（1000/delta），分頁切回巨量 delta 跳過不計
     if (delta < 1000) {
-      const raw = 1000 / Math.max(delta, 1);
-      if (raw < 50) {
-        this.fpsCountLow50++;
-      } else if (raw < 60) {
-        this.fpsCountLow60++;
-      }
-      this.fpsOverlay.set(
-        Math.round(raw),
-        this.fpsCountLow60,
-        this.fpsCountLow50
-      );
+      this.fpsOverlay.set(Math.round(1000 / Math.max(delta, 1)));
     }
 
     this.playerManager?.tick();

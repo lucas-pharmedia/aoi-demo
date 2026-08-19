@@ -54,6 +54,11 @@ function send(ws: WebSocket, packet: ServerPacket) {
   }
 }
 
+/** 只留協定欄位，避免把 ws/socket 內部物件序列化出去 */
+function toPlain(p: { id: string; x: number; y: number }): PlayerState {
+  return { id: p.id, x: p.x, y: p.y };
+}
+
 wss.on("connection", (ws) => {
   const id = `p_${nextId++}`;
   const { x, y } = randomSpawn();
@@ -129,9 +134,9 @@ function syncView(p: ConnectedPlayer, nearby: PlayerState[]): void {
   }
   for (const id of leaves) p.lastKnown.delete(id);
 
-  if (enters.length) send(p.ws, { type: "enter", players: enters });
+  if (enters.length) send(p.ws, { type: "enter", players: enters.map(toPlain) });
   if (leaves.length) send(p.ws, { type: "leave", players: leaves });
-  if (moves.length) send(p.ws, { type: "move", players: moves });
+  if (moves.length) send(p.ws, { type: "move", players: moves.map(toPlain) });
 }
 
 function addToBucket(p: BucketEntry): void {
@@ -220,7 +225,7 @@ setInterval(() => {
     syncView(p, nearby);
 
     if ((tick + p.snapOffset) % SNAPSHOT_TICKS === 0) {
-      send(p.ws, { type: "update", players: nearby });
+      send(p.ws, { type: "update", players: nearby.map(toPlain) });
       for (const q of nearby) p.lastKnown.set(q.id, { x: q.x, y: q.y });
     }
   }

@@ -189,6 +189,11 @@ if (cluster.isPrimary) {
     }
   }
 
+  /** 只留協定欄位，避免把 ws/socket 內部物件序列化出去 */
+  function toPlain(p: { id: string; x: number; y: number }): PlayerState {
+    return { id: p.id, x: p.x, y: p.y };
+  }
+
   // 接收 master 的全域同步：新 worker 收一次全量，之後只收 diff 增量套用
   cluster.worker?.on("message", (msg: { type?: string }) => {
     if (msg?.type === "MASTER_SYNC_ALL") {
@@ -315,9 +320,9 @@ if (cluster.isPrimary) {
     }
     for (const id of leaves) p.lastKnown.delete(id);
 
-    if (enters.length) send(p.ws, { type: "enter", players: enters });
+    if (enters.length) send(p.ws, { type: "enter", players: enters.map(toPlain) });
     if (leaves.length) send(p.ws, { type: "leave", players: leaves });
-    if (moves.length) send(p.ws, { type: "move", players: moves });
+    if (moves.length) send(p.ws, { type: "move", players: moves.map(toPlain) });
   }
 
   function addToBucket(p: BucketEntry): void {
@@ -436,7 +441,7 @@ if (cluster.isPrimary) {
       syncView(p, nearby);
 
       if ((tick + p.snapOffset) % SNAPSHOT_TICKS === 0) {
-        send(p.ws, { type: "update", players: nearby });
+        send(p.ws, { type: "update", players: nearby.map(toPlain) });
         for (const q of nearby) p.lastKnown.set(q.id, { x: q.x, y: q.y });
       }
     }
