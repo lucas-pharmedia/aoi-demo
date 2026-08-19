@@ -27,9 +27,9 @@ const PORT = 8088;
 const TICK_MS = 16;
 const MOVE_THRESHOLD = 1;
 const SNAPSHOT_TICKS = 60;
-const MAX_AOI_CAP = 10;
-/** 跨 worker 狀態同步頻率：每 N tick 一次（1 = 20Hz，跟 AOI tick 同頻）。 */
-const SYNC_EVERY_TICKS = 1;
+const MAX_AOI_CAP = 50;
+/** 跨 worker 狀態同步頻率：每 N tick 一次（2 = 31Hz，降低 master 廣播 + 全量 rebuild 負載）。 */
+const SYNC_EVERY_TICKS = 2;
 
 /** IPC 上傳的玩家短表（不含 ws，避免跨行程傳 socket） */
 interface WorkerPlayerState extends PlayerState {
@@ -41,7 +41,7 @@ interface WorkerPlayerState extends PlayerState {
 // ----------------------------------------------------------------------
 if (cluster.isPrimary) {
   // const numCPUs = 1;
-  const numCPUs = os.cpus().length;
+  const numCPUs = 8;
   console.log(`[Master] PID:${process.pid} 啟動，開 ${numCPUs} 個 Worker`);
 
   /** workerId -> 該 worker 最新上傳的玩家狀態 */
@@ -51,9 +51,14 @@ if (cluster.isPrimary) {
   let masterTick = 0;
   let masterBroadcastSum = 0;
   let masterBroadcastCount = 0;
+  /** 上次廣播的全域狀態（算 diff 用） */
+  let lastBroadcast = new Map<string, WorkerPlayerState>();
+  /** 剛 fork / 補開的 worker 需先收一次全量快照 bootstrap */
+  const needsFull = new Set<number>();
 
   for (let i = 0; i < numCPUs; i++) {
-    cluster.fork();
+    const w = cluster.fork();
+    needsFull.add(w.id ?? i + 1);
   }
 
   cluster.on("message", (worker, msg: { type?: string }) => {
@@ -66,7 +71,7 @@ if (cluster.isPrimary) {
     }
   });
 
-  // 節流廣播：每 SYNC_EVERY_TICKS 個 tick 才彙整廣播一次，無變動則完全跳過
+  // 節流廣播：每 SYNC_EVERY_TICKS 個 tick 才彙整一次，無變動則完全跳過
   setInterval(() => {
     masterTick++;
     if (masterTick % SYNC_EVERY_TICKS !== 0) return;
@@ -74,35 +79,65 @@ if (cluster.isPrimary) {
     stateDirty = false;
 
     const bcastStart = Date.now();
-    const all: WorkerPlayerState[] = [];
+    const current = new Map<string, WorkerPlayerState>();
     for (const states of workerStates.values()) {
-      for (const s of states) all.push(s);
+      for (const s of states) current.set(s.id, s);
     }
-    const payload = { type: "MASTER_SYNC_ALL", states: all } as const;
+
+    // 算 diff：新增/位置或格子變動 → moved；消失 → left
+    const moved: WorkerPlayerState[] = [];
+    const left: string[] = [];
+    for (const [id, s] of current) {
+      const prev = lastBroadcast.get(id);
+      if (
+        !prev ||
+        prev.x !== s.x ||
+        prev.y !== s.y ||
+        prev.gridKey !== s.gridKey
+      ) {
+        moved.push(s);
+      }
+    }
+    for (const id of lastBroadcast.keys()) {
+      if (!current.has(id)) left.push(id);
+    }
+    lastBroadcast = current;
+
+    // 無變動且無新 worker → 完全不送，省 IPC
+    if (moved.length === 0 && left.length === 0 && needsFull.size === 0) {
+      return;
+    }
+
+    const diffPayload = { type: "MASTER_SYNC_DIFF", moved, left } as const;
+    let allArr: WorkerPlayerState[] | null = null;
     for (const id of workerStates.keys()) {
       const w = cluster.workers?.[id];
-      if (w?.isConnected()) {
-        try {
-          w.send(payload);
-        } catch {
-          // worker 剛斷線，忽略
+      if (!w?.isConnected()) continue;
+      try {
+        if (needsFull.delete(id)) {
+          if (!allArr) allArr = [...current.values()];
+          w.send({ type: "MASTER_SYNC_ALL", states: allArr });
+        } else {
+          w.send(diffPayload);
         }
+      } catch {
+        // worker 剛斷線，忽略
       }
     }
     const bcastMs = Date.now() - bcastStart;
     masterBroadcastSum += bcastMs;
     masterBroadcastCount++;
     if (bcastMs > 80) {
-      console.log(`[Master] spike broadcast=${bcastMs}ms total=${all.length}`);
+      console.log(
+        `[Master] spike broadcast=${bcastMs}ms total=${current.size}`
+      );
     }
     if (masterTick % 180 === 0) {
       const avg =
         masterBroadcastCount > 0
           ? (masterBroadcastSum / masterBroadcastCount).toFixed(1)
           : "0";
-      console.log(
-        `[Master] tick avgBroadcast=${avg}ms total=${all.length}`
-      );
+      console.log(`[Master] tick avgBroadcast=${avg}ms total=${current.size}`);
       masterBroadcastSum = 0;
       masterBroadcastCount = 0;
     }
@@ -111,7 +146,8 @@ if (cluster.isPrimary) {
   cluster.on("exit", (worker) => {
     workerStates.delete(worker.id);
     console.log(`[Master] Worker ${worker.process.pid} 離線，補開一個`);
-    cluster.fork();
+    const w = cluster.fork();
+    needsFull.add(w.id);
   });
 } else {
   // ----------------------------------------------------------------------
@@ -123,12 +159,18 @@ if (cluster.isPrimary) {
     ws: WebSocket;
     gridKey: string;
     lastKnown: Map<string, { x: number; y: number }>;
+    snapOffset: number;
   }
 
   /** 連到「這個 worker」的玩家（socket owner） */
   const localPlayers = new Map<string, ConnectedPlayer>();
-  /** 全域所有玩家快照（master 每 tick 同步來；含其他 worker 的玩家） */
+  /** 全域所有玩家快照（master 同步來；含其他 worker 的玩家） */
   let allPlayersCache = new Map<string, WorkerPlayerState>();
+  /** 持久化 Spatial Bucket（master 送 diff 增量套用，不全量重建） */
+  type BucketEntry = PlayerState & { gridKey: string };
+  const gridBuckets = new Map<string, BucketEntry[]>();
+  /** id -> 目前所在的 bucket gridKey（追蹤增量移動） */
+  const playerBucketKey = new Map<string, string>();
 
   let nextId = 1;
 
@@ -147,7 +189,7 @@ if (cluster.isPrimary) {
     }
   }
 
-  // 接收 master 的全域快照
+  // 接收 master 的全域同步：新 worker 收一次全量，之後只收 diff 增量套用
   cluster.worker?.on("message", (msg: { type?: string }) => {
     if (msg?.type === "MASTER_SYNC_ALL") {
       const next = new Map<string, WorkerPlayerState>();
@@ -155,6 +197,45 @@ if (cluster.isPrimary) {
         next.set(s.id, s);
       }
       allPlayersCache = next;
+      rebuildBuckets();
+    } else if (msg?.type === "MASTER_SYNC_DIFF") {
+      const { moved, left } = msg as {
+        moved: WorkerPlayerState[];
+        left: string[];
+      };
+      for (const id of left) {
+        if (allPlayersCache.delete(id)) removeFromBucket(id);
+      }
+      for (const s of moved) {
+        const local = localPlayers.get(s.id);
+        if (local) {
+          // 本地玩家以本 worker 為準，bucket 持 ConnectedPlayer 引用位置自動更新；
+          // 這裡只需同步 cache 副本，跨格搬移由 applyLocalBucketMoves 每 tick 處理
+          const prev = allPlayersCache.get(s.id);
+          if (prev) {
+            prev.x = s.x;
+            prev.y = s.y;
+            prev.gridKey = s.gridKey;
+          } else {
+            allPlayersCache.set(s.id, s);
+          }
+          continue;
+        }
+        const prev = allPlayersCache.get(s.id);
+        if (!prev) {
+          allPlayersCache.set(s.id, s);
+          addToBucket(s);
+        } else if (prev.gridKey !== s.gridKey) {
+          removeFromBucket(s.id);
+          prev.x = s.x;
+          prev.y = s.y;
+          prev.gridKey = s.gridKey;
+          addToBucket(prev);
+        } else {
+          prev.x = s.x;
+          prev.y = s.y;
+        }
+      }
     }
   });
 
@@ -170,8 +251,10 @@ if (cluster.isPrimary) {
       ws,
       gridKey: gridKey(gx, gy),
       lastKnown: new Map(),
+      snapOffset: nextId % SNAPSHOT_TICKS,
     };
     localPlayers.set(id, player);
+    addToBucket(player);
 
     send(ws, {
       type: "init",
@@ -204,6 +287,7 @@ if (cluster.isPrimary) {
 
     ws.on("close", () => {
       localPlayers.delete(id);
+      removeFromBucket(id);
     });
   });
 
@@ -236,6 +320,57 @@ if (cluster.isPrimary) {
     if (moves.length) send(p.ws, { type: "move", players: moves });
   }
 
+  function addToBucket(p: BucketEntry): void {
+    let arr = gridBuckets.get(p.gridKey);
+    if (!arr) {
+      arr = [];
+      gridBuckets.set(p.gridKey, arr);
+    }
+    arr.push(p);
+    playerBucketKey.set(p.id, p.gridKey);
+  }
+
+  function removeFromBucket(id: string): void {
+    const key = playerBucketKey.get(id);
+    if (!key) return;
+    const arr = gridBuckets.get(key);
+    if (arr) {
+      const i = arr.findIndex((p) => p.id === id);
+      if (i >= 0) arr.splice(i, 1);
+    }
+    playerBucketKey.delete(id);
+  }
+
+  /** bootstrap：新 worker 收到全量快照後全量重建一次 bucket */
+  function rebuildBuckets(): void {
+    gridBuckets.clear();
+    playerBucketKey.clear();
+    for (const p of allPlayersCache.values()) {
+      if (localPlayers.has(p.id)) continue;
+      addToBucket(p);
+    }
+    for (const p of localPlayers.values()) {
+      addToBucket(p);
+    }
+  }
+
+  /** 非快照 tick：只把本地玩家的位置增量搬進正確 bucket（連線已持有同一物件，位置自動更新） */
+  function applyLocalBucketMoves(): void {
+    for (const p of localPlayers.values()) {
+      const key = playerBucketKey.get(p.id);
+      if (key !== p.gridKey) {
+        if (key) {
+          const arr = gridBuckets.get(key);
+          if (arr) {
+            const i = arr.findIndex((q) => q.id === p.id);
+            if (i >= 0) arr.splice(i, 1);
+          }
+        }
+        addToBucket(p);
+      }
+    }
+  }
+
   let tick = 0;
   let lastTickTime = Date.now();
   let tickIntervalSum = 0;
@@ -248,7 +383,9 @@ if (cluster.isPrimary) {
     lastTickTime = now;
     if (interval > 80) {
       console.log(
-        `[Worker ${workerId}] spike interval=${interval}ms local=${localPlayers.size} global=${allPlayersCache.size + localPlayers.size}`
+        `[Worker ${workerId}] spike interval=${interval}ms local=${
+          localPlayers.size
+        } global=${allPlayersCache.size + localPlayers.size}`
       );
     }
     const computeStart = now;
@@ -269,19 +406,8 @@ if (cluster.isPrimary) {
       }
     }
 
-    // 2. 合併「全域快照」+「自己的玩家」（自己的以本 worker 為準），重建 Spatial Bucket
-    const combined = new Map<string, WorkerPlayerState>(allPlayersCache);
-    for (const p of localPlayers.values()) {
-      combined.set(p.id, { id: p.id, x: p.x, y: p.y, gridKey: p.gridKey });
-    }
-
-    const gridBuckets = new Map<string, PlayerState[]>();
-    for (const p of combined.values()) {
-      if (!gridBuckets.has(p.gridKey)) {
-        gridBuckets.set(p.gridKey, []);
-      }
-      gridBuckets.get(p.gridKey)!.push({ id: p.id, x: p.x, y: p.y });
-    }
+    // 2. Spatial Bucket：快照/diff 已在 message handler 增量套用，這裡只搬本地玩家跨格
+    applyLocalBucketMoves();
 
     // 3. 對自己 worker 的每個玩家算 AOI（含跨 worker 玩家）
     for (const p of localPlayers.values()) {
@@ -309,7 +435,7 @@ if (cluster.isPrimary) {
 
       syncView(p, nearby);
 
-      if (tick % SNAPSHOT_TICKS === 0) {
+      if ((tick + p.snapOffset) % SNAPSHOT_TICKS === 0) {
         send(p.ws, { type: "update", players: nearby });
         for (const q of nearby) p.lastKnown.set(q.id, { x: q.x, y: q.y });
       }

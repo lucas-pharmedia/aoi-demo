@@ -27,10 +27,16 @@ interface ConnectedPlayer extends PlayerState {
   ws: WebSocket;
   gridKey: string;
   lastKnown: Map<string, { x: number; y: number }>;
+  snapOffset: number;
 }
 
 /** 所有玩家（單 process，全部在自己手上） */
 const players = new Map<string, ConnectedPlayer>();
+/** 持久化 Spatial Bucket（增量維護，不每 tick 全量重建） */
+type BucketEntry = PlayerState & { gridKey: string };
+const gridBuckets = new Map<string, BucketEntry[]>();
+/** id -> 目前所在的 bucket gridKey（追蹤增量移動） */
+const playerBucketKey = new Map<string, string>();
 
 let nextId = 1;
 
@@ -59,8 +65,10 @@ wss.on("connection", (ws) => {
     ws,
     gridKey: gridKey(gx, gy),
     lastKnown: new Map(),
+    snapOffset: nextId % SNAPSHOT_TICKS,
   };
   players.set(id, player);
+  addToBucket(player);
 
   send(ws, {
     type: "init",
@@ -93,6 +101,7 @@ wss.on("connection", (ws) => {
 
   ws.on("close", () => {
     players.delete(id);
+    removeFromBucket(id);
   });
 });
 
@@ -125,6 +134,44 @@ function syncView(p: ConnectedPlayer, nearby: PlayerState[]): void {
   if (moves.length) send(p.ws, { type: "move", players: moves });
 }
 
+function addToBucket(p: BucketEntry): void {
+  let arr = gridBuckets.get(p.gridKey);
+  if (!arr) {
+    arr = [];
+    gridBuckets.set(p.gridKey, arr);
+  }
+  arr.push(p);
+  playerBucketKey.set(p.id, p.gridKey);
+}
+
+function removeFromBucket(id: string): void {
+  const key = playerBucketKey.get(id);
+  if (!key) return;
+  const arr = gridBuckets.get(key);
+  if (arr) {
+    const i = arr.findIndex((p) => p.id === id);
+    if (i >= 0) arr.splice(i, 1);
+  }
+  playerBucketKey.delete(id);
+}
+
+/** 每 tick 只把玩家位置的增量搬進正確 bucket（連線已持有同一物件，位置自動更新） */
+function applyLocalBucketMoves(): void {
+  for (const p of players.values()) {
+    const key = playerBucketKey.get(p.id);
+    if (key !== p.gridKey) {
+      if (key) {
+        const arr = gridBuckets.get(key);
+        if (arr) {
+          const i = arr.findIndex((q) => q.id === p.id);
+          if (i >= 0) arr.splice(i, 1);
+        }
+      }
+      addToBucket(p);
+    }
+  }
+}
+
 let tick = 0;
 let lastTickTime = Date.now();
 let tickIntervalSum = 0;
@@ -143,14 +190,8 @@ setInterval(() => {
   tickIntervalSum += interval;
   tickCount++;
 
-  // 重建 Spatial Bucket（單 process：只有本地玩家，無跨 worker）
-  const gridBuckets = new Map<string, PlayerState[]>();
-  for (const p of players.values()) {
-    if (!gridBuckets.has(p.gridKey)) {
-      gridBuckets.set(p.gridKey, []);
-    }
-    gridBuckets.get(p.gridKey)!.push({ id: p.id, x: p.x, y: p.y });
-  }
+  // 增量維護 Spatial Bucket（只搬跨格玩家，不全量重建）
+  applyLocalBucketMoves();
 
   // 對每個玩家算 AOI 九宮格
   for (const p of players.values()) {
@@ -178,7 +219,7 @@ setInterval(() => {
 
     syncView(p, nearby);
 
-    if (tick % SNAPSHOT_TICKS === 0) {
+    if ((tick + p.snapOffset) % SNAPSHOT_TICKS === 0) {
       send(p.ws, { type: "update", players: nearby });
       for (const q of nearby) p.lastKnown.set(q.id, { x: q.x, y: q.y });
     }
