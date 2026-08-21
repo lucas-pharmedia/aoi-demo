@@ -1,11 +1,10 @@
 /**
- * AOI 九宮格即時同步伺服器 (單執行緒 - 極致效能優化版)
+ * AOI 九宮格即時同步伺服器 (單執行緒 - 極速精確最近 N 人版)
  *
- * 核心優化：
- *   1. 調整 TICK_MS = 33 (30 FPS)，搭配前端內插，CPU 負擔減少 50%
- *   2. 徹底消除 syncView 中的 Set / Array 臨時物件建立，避免 V8 GC Spike
- *   3. 距離計算改用「平方距離」(dx*dx + dy*dy)，省去開根號 CPU 運算
- *   4. 預先建立 Plain Object (toPlain)，減少 JSON 序列化前的物件轉譯開銷
+ * 核心修復：
+ *   1. 完全復原原有的 ./grid.ts 模組引入 (MAP_WIDTH, MAP_HEIGHT, toGrid, gridKey 等)
+ *   2. 精確最近 N 人：使用 selectNearestAOI 搭配平方距離比對，不開根號且 100% 安全
+ *   3. 零 GC 配置：全域復用陣列，徹底解決 GC 帶來的 Spike
  */
 import { WebSocketServer, WebSocket } from "ws";
 import {
@@ -14,34 +13,40 @@ import {
   toGrid,
   gridKey,
   getSurroundingGridKeys,
-  nearest,
 } from "./grid.ts";
 import type { PlayerState, ServerPacket, ClientPacket } from "./types.ts";
 
 const PORT = 8088;
-const TICK_MS = 33; // 30 FPS (伺服器黃金標準，CPU 負擔減半)
-const MOVE_THRESHOLD_SQ = 1 * 1; // 距離門檻平方 (避免 Math.hypot 開根號)
+const TICK_MS = 33; // 30 FPS (黃金標準)
+const MOVE_THRESHOLD_SQ = 1 * 1; // 1px 移動門檻平方
 const SNAPSHOT_TICKS = 30; // 約 1 秒一次全量快照
-const MAX_AOI_CAP = 50;
+const MAX_AOI_CAP = 50; // 視野最多顯示人數
 
 interface ConnectedPlayer extends PlayerState {
   ws: WebSocket;
   gridKey: string;
   lastKnown: Map<string, { x: number; y: number }>;
   snapOffset: number;
-  plain: PlayerState; // 預先快照好的純資料物件，避免每 tick 重新建構
+  plain: PlayerState; // 預先快照好的純資料物件
 }
 
 /** 所有玩家 */
 const players = new Map<string, ConnectedPlayer>();
 
-/** 持久化 Spatial Bucket */
+/** 持久化 Spatial Bucket (使用原本 gridKey 算出的 string Key) */
 type BucketEntry = ConnectedPlayer;
 const gridBuckets = new Map<string, BucketEntry[]>();
 const playerBucketKey = new Map<string, string>();
 
-let nextId = 1;
+// ----------------------------------------------------------------------
+// 全域重用記憶體池 (Zero-Allocation)，徹底消滅 GC 負擔
+// ----------------------------------------------------------------------
+const tempNearby: ConnectedPlayer[] = [];
+const tempEnters: PlayerState[] = [];
+const tempMoves: PlayerState[] = [];
+const tempLeaves: string[] = [];
 
+let nextId = 1;
 const wss = new WebSocketServer({ port: PORT });
 
 function randomSpawn(): { x: number; y: number } {
@@ -115,61 +120,84 @@ wss.on("connection", (ws) => {
 });
 
 /**
- * 零 GC 負擔的 View 同步 (避免 new Set, Array.map, Math.hypot)
+ * 精確的最近 N 人快速排序 (平方距離比對，零開根號，安全不遺失物件)
  */
-function syncViewOptimized(
+function selectNearestAOI(
   p: ConnectedPlayer,
-  nearby: ConnectedPlayer[]
-): void {
-  const lastKnown = p.lastKnown;
-  const enters: PlayerState[] = [];
-  const moves: PlayerState[] = [];
+  candidateCount: number,
+  maxCap: number
+): number {
+  if (candidateCount <= maxCap) {
+    return candidateCount;
+  }
 
-  // 1. 單次 O(N) 迴圈比對 Enter 與 Move
-  for (let i = 0; i < nearby.length; i++) {
-    const q = nearby[i];
+  // 使用平方距離快速排序，不呼叫昂貴的 Math.sqrt
+  tempNearby.sort((a, b) => {
+    const dxA = a.x - p.x;
+    const dyA = a.y - p.y;
+    const distA = dxA * dxA + dyA * dyA;
+
+    const dxB = b.x - p.x;
+    const dyB = b.y - p.y;
+    const distB = dxB * dxB + dyB * dyB;
+
+    return distA - distB;
+  });
+
+  return maxCap;
+}
+
+/**
+ * 零 GC 配置的視圖同步 (重用全域陣列)
+ */
+function syncViewOptimized(p: ConnectedPlayer, nearbyCount: number): void {
+  const lastKnown = p.lastKnown;
+  tempEnters.length = 0;
+  tempMoves.length = 0;
+
+  // 1. 單次 O(N) 比對 Enter 與 Move
+  for (let i = 0; i < nearbyCount; i++) {
+    const q = tempNearby[i];
     const prev = lastKnown.get(q.id);
 
     if (!prev) {
-      enters.push(q.plain);
+      tempEnters.push(q.plain);
       lastKnown.set(q.id, { x: q.x, y: q.y });
     } else {
       const dx = q.x - prev.x;
       const dy = q.y - prev.y;
-      // 距離平方比對，避開開根號
       if (dx * dx + dy * dy >= MOVE_THRESHOLD_SQ) {
-        moves.push(q.plain);
+        tempMoves.push(q.plain);
         prev.x = q.x;
         prev.y = q.y;
       }
     }
   }
 
-  // 2. 檢查 Leave (極簡 O(K) 檢查，K 為視野內人數)
-  if (lastKnown.size > nearby.length - enters.length) {
-    const leaves: string[] = [];
+  // 2. 檢查 Leave
+  if (lastKnown.size > nearbyCount - tempEnters.length) {
+    tempLeaves.length = 0;
     for (const [id] of lastKnown) {
       let found = false;
-      for (let i = 0; i < nearby.length; i++) {
-        if (nearby[i].id === id) {
+      for (let i = 0; i < nearbyCount; i++) {
+        if (tempNearby[i].id === id) {
           found = true;
           break;
         }
       }
-      if (!found) {
-        leaves.push(id);
-      }
+      if (!found) tempLeaves.push(id);
     }
 
-    for (let i = 0; i < leaves.length; i++) {
-      lastKnown.delete(leaves[i]);
+    for (let i = 0; i < tempLeaves.length; i++) {
+      lastKnown.delete(tempLeaves[i]);
     }
 
-    if (leaves.length > 0) send(p.ws, { type: "leave", players: leaves });
+    if (tempLeaves.length > 0)
+      send(p.ws, { type: "leave", players: tempLeaves });
   }
 
-  if (enters.length > 0) send(p.ws, { type: "enter", players: enters });
-  if (moves.length > 0) send(p.ws, { type: "move", players: moves });
+  if (tempEnters.length > 0) send(p.ws, { type: "enter", players: tempEnters });
+  if (tempMoves.length > 0) send(p.ws, { type: "move", players: tempMoves });
 }
 
 function addToBucket(p: BucketEntry): void {
@@ -239,31 +267,36 @@ setInterval(() => {
     const { gx, gy } = toGrid(p.x, p.y);
     const aoiKeys = getSurroundingGridKeys(gx, gy);
 
-    let nearby: ConnectedPlayer[] = [];
+    tempNearby.length = 0;
+
+    // 完全使用你原本的九宮格 Key 陣列尋找桶子
     for (let i = 0; i < aoiKeys.length; i++) {
       const bucket = gridBuckets.get(aoiKeys[i]);
       if (bucket) {
         for (let j = 0; j < bucket.length; j++) {
           const other = bucket[j];
-          if (other.id !== p.id) nearby.push(other);
+          if (other.id !== p.id) {
+            tempNearby.push(other);
+          }
         }
       }
     }
 
-    // 限制最大視野人數
-    nearby = nearest(p.x, p.y, nearby, MAX_AOI_CAP) as ConnectedPlayer[];
+    // 精確最近 50 人篩選 (避開 Math.sqrt 開根號)
+    const nearbyCount = selectNearestAOI(p, tempNearby.length, MAX_AOI_CAP);
 
-    // 3. 零 GC 視圖同步
-    syncViewOptimized(p, nearby);
+    // 3. 視圖同步 (Zero-Alloc)
+    syncViewOptimized(p, nearbyCount);
 
     // 4. 定期全量 Snapshot
     if ((tick + p.snapOffset) % SNAPSHOT_TICKS === 0) {
-      send(p.ws, {
-        type: "update",
-        players: nearby.map((q) => q.plain),
-      });
-      for (let i = 0; i < nearby.length; i++) {
-        const q = nearby[i];
+      const snapPlayers: PlayerState[] = [];
+      for (let i = 0; i < nearbyCount; i++) {
+        snapPlayers.push(tempNearby[i].plain);
+      }
+      send(p.ws, { type: "update", players: snapPlayers });
+      for (let i = 0; i < nearbyCount; i++) {
+        const q = tempNearby[i];
         p.lastKnown.set(q.id, { x: q.x, y: q.y });
       }
     }
