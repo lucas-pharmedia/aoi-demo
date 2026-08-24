@@ -13,7 +13,7 @@ export const MAP_HEIGHT = 3360;
 /** X 軸格子數 */
 export const GRID_COLS = 8;
 /** Y 軸格子數 */
-export const GRID_ROWS = 3;
+export const GRID_ROWS = 5;
 /** 單一 Grid 寬度 (px) */
 export const GRID_WIDTH = MAP_WIDTH / GRID_COLS;
 /** 單一 Grid 高度 (px) */

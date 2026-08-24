@@ -17,9 +17,9 @@ import {
 import type { PlayerState, ServerPacket, ClientPacket } from "./types.ts";
 
 const PORT = 8088;
-const TICK_MS = 33; // 30 FPS (黃金標準)
+const TICK_MS = 67; // 30 FPS (黃金標準)
 const MOVE_THRESHOLD_SQ = 1 * 1; // 1px 移動門檻平方
-const SNAPSHOT_TICKS = 30; // 約 1 秒一次全量快照
+const SNAPSHOT_TICKS = 15; // 約 1 秒一次全量快照
 const MAX_AOI_CAP = 50; // 視野最多顯示人數
 
 interface ConnectedPlayer extends PlayerState {
