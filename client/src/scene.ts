@@ -23,8 +23,7 @@ import {
   GRID_COLS,
   GRID_ROWS,
   toGrid,
-  gridKey,
-  getSurroundingGridKeys,
+  getSurroundingGridIds,
 } from "../../shared/grid.ts";
 import type { PlayerState, ServerPacket } from "./types.ts";
 import { FpsOverlay } from "./ui/fps.ts";
@@ -37,8 +36,8 @@ interface RemotePlayer {
   leaving: boolean;
 }
 
-/** 內插緩衝區：畫面恆渲染「now-100ms」的歷史位置，封包 16/32ms 抖動完全不影響平滑度 */
-const BUFFER_DELAY_MS = 100;
+/** 內插緩衝區：伺服器改成 15 Hz (67ms) 後，建議設為 130ms，抗 Jitter 與平滑度最佳 */
+const BUFFER_DELAY_MS = 130;
 /** 緩衝區最多留幾筆快照（60Hz * 2s） */
 const MAX_BUFFER_SNAPSHOTS = 120;
 /** 遠端進出場淡入/淡出時間 */
@@ -51,7 +50,7 @@ export class GameScene extends Phaser.Scene {
   private aoiOverlay!: Phaser.GameObjects.Graphics;
   private remotes = new Map<string, RemotePlayer>();
   private lastSend = 0;
-  private lastGridKey = "";
+  private lastGridId = -1; // 改用數字 ID 紀錄上一次的 Grid
   private lastTotal = -1;
   private fpsOverlay!: FpsOverlay;
 
@@ -252,17 +251,20 @@ export class GameScene extends Phaser.Scene {
     const player = this.playerManager?.getPlayer();
     if (!player) return;
 
-    const { gx, gy } = toGrid(player.sprite.x, player.sprite.y);
-    const key = gridKey(gx, gy);
-    if (key === this.lastGridKey) return;
-    this.lastGridKey = key;
+    const currentGridId = toGrid(player.sprite.x, player.sprite.y);
+    if (currentGridId === this.lastGridId) return;
+    this.lastGridId = currentGridId;
 
-    const aoiKeys = new Set(getSurroundingGridKeys(gx, gy));
+    const aoiIds = new Set(getSurroundingGridIds(currentGridId));
     const g = this.aoiOverlay;
     g.clear();
+
+    // 走訪畫面上所有網格，若屬於 AOI 則高亮
     for (let r = 0; r < GRID_ROWS; r++) {
       for (let c = 0; c < GRID_COLS; c++) {
-        if (!aoiKeys.has(gridKey(c, r))) continue;
+        const id = r * GRID_COLS + c;
+        if (!aoiIds.has(id)) continue;
+
         g.fillStyle(0x4488ff, 0.15);
         g.fillRect(c * GRID_WIDTH, r * GRID_HEIGHT, GRID_WIDTH, GRID_HEIGHT);
         g.lineStyle(2, 0x66aaff, 0.9);
@@ -272,8 +274,6 @@ export class GameScene extends Phaser.Scene {
   }
 
   private lerpRemotes(_delta: number): void {
-    // 內插緩衝區：畫面恆渲染「now-100ms」的歷史位置，在兩個已知歷史快照間 Linear 平滑移動。
-    // 純內插、零外插——不猜未來，因此不會過衝、不會往後跳。
     const renderTime = this.time.now - BUFFER_DELAY_MS;
     for (const rp of this.remotes.values()) {
       const buf = rp.buffer;
@@ -315,16 +315,13 @@ export class GameScene extends Phaser.Scene {
             const dir = directionFromDelta(tdx, tdy);
             rp.lastDir = dir;
             const animKey = walkAnimKey(PLAYER_SPRITE_TEXTURE_KEY, dir);
-            // stop() 後 currentAnim.key 仍殘留舊值，不能拿它判斷「在播」；
-            // play(key, true) 的 ignoreIfPlaying 會自己決定要不要重播
             rp.sprite.play(animKey, true);
           } else if (rp.sprite.anims.isPlaying) {
             rp.sprite.anims.stop();
             rp.sprite.setFrame(WALK_ANIM_FRAMES[rp.lastDir].start + 1);
           }
         } else {
-          // buffer 乾涸（包遲到超過緩衝深度）：停在最新已知位置，不加外插；
-          // 此時已無位移 → 動畫一併停掉，避免「站在原地走」的殘影
+          // buffer 乾涸：停在最新已知位置
           x = s2.x;
           y = s2.y;
           if (rp.sprite.anims.isPlaying) {
@@ -343,12 +340,11 @@ export class GameScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number): void {
-    // 單幀卡頓偵測：>50ms = 主執行緒卡住（<1000ms 排除分頁切回）
+    // 單幀卡頓偵測：>50ms = 主執行緒卡住
     if (delta > 50 && delta < 1000) {
       console.log(`[FRAME] hitched ${delta.toFixed(0)}ms`);
     }
 
-    // 右上角 fps：每幀純 raw（1000/delta），分頁切回巨量 delta 跳過不計
     if (delta < 1000) {
       this.fpsOverlay.set(Math.round(1000 / Math.max(delta, 1)));
     }
@@ -357,7 +353,7 @@ export class GameScene extends Phaser.Scene {
     this.lerpRemotes(delta);
     this.drawAoi();
 
-    // 人數 log：自己 + 視野內遠端（人數有變才印）
+    // 人數 log
     if (this.playerManager?.getPlayer()) {
       const total = 1 + this.remotes.size;
       if (total !== this.lastTotal) {
@@ -368,7 +364,7 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    // 玩家行走中（鍵盤／navmesh 路徑）→ 節流發送位置
+    // 玩家行走中 → 節流發送位置 (約 60fps / 16ms 傳送)
     const player = this.playerManager?.getPlayer();
     if (player && (player.keyboardMoveActive || player.isPathMoving)) {
       const now = this.time.now;
