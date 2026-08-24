@@ -21,7 +21,7 @@ import {
   gridKey,
   getSurroundingGridKeys,
   nearest,
-} from "./grid.ts";
+} from "../../shared/grid.ts";
 import type { PlayerState, ServerPacket, ClientPacket } from "./types.ts";
 
 const PORT = 8088;

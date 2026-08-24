@@ -1,5 +1,5 @@
 /**
- * 九宮格 (AOI) 空間分割工具
+ * 九宮格 (AOI) 空間分割工具 — client / server 共用
  *
  * 地圖被切成固定大小的格子 (Grid)，每個玩家屬於一個格子。
  * AOI 視野 = 玩家所在格 + 周圍相鄰 8 格（最多 9 格）。
@@ -10,14 +10,14 @@
 export const MAP_WIDTH = 5056;
 /** 地圖高度 (px)：105 tile × 32px */
 export const MAP_HEIGHT = 3360;
-/** 單一 Grid 寬度 (px)：約 19.75 tile × 32px（8×3 格網） */
-export const GRID_WIDTH = 632;
-/** 單一 Grid 高度 (px)：35 tile × 32px（8×3 格網） */
-export const GRID_HEIGHT = 1120;
-/** X 軸格子數：5056/632 = 8 格 (0~7) */
+/** X 軸格子數 */
 export const GRID_COLS = 8;
-/** Y 軸格子數：3360/1120 = 3 格 (0~2) */
+/** Y 軸格子數 */
 export const GRID_ROWS = 3;
+/** 單一 Grid 寬度 (px) */
+export const GRID_WIDTH = MAP_WIDTH / GRID_COLS;
+/** 單一 Grid 高度 (px) */
+export const GRID_HEIGHT = MAP_HEIGHT / GRID_ROWS;
 
 /** 座標換算後的網格座標 */
 export interface GridCoord {

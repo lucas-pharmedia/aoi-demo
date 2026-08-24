@@ -2,7 +2,7 @@
  * AOI 九宮格即時同步伺服器 (單執行緒 - 極速精確最近 N 人版)
  *
  * 核心修復：
- *   1. 完全復原原有的 ./grid.ts 模組引入 (MAP_WIDTH, MAP_HEIGHT, toGrid, gridKey 等)
+ *   1. 完全復原原有的 shared/grid 模組引入 (MAP_WIDTH, MAP_HEIGHT, toGrid, gridKey 等)
  *   2. 精確最近 N 人：使用 selectNearestAOI 搭配平方距離比對，不開根號且 100% 安全
  *   3. 零 GC 配置：全域復用陣列，徹底解決 GC 帶來的 Spike
  */
@@ -13,7 +13,7 @@ import {
   toGrid,
   gridKey,
   getSurroundingGridKeys,
-} from "./grid.ts";
+} from "../../shared/grid.ts";
 import type { PlayerState, ServerPacket, ClientPacket } from "./types.ts";
 
 const PORT = 8088;

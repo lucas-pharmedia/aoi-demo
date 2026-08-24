@@ -15,9 +15,7 @@
  */
 import WebSocket from "ws";
 import type { ServerPacket } from "../src/types.ts";
-
-const MAP_WIDTH = 5056;
-const MAP_HEIGHT = 3360;
+import { MAP_WIDTH, MAP_HEIGHT } from "../../shared/grid.ts";
 
 /** 判斷「卡」：平均封包間隔超過此值 (ms)。正常 50ms 左右。 */
 const LAG_THRESHOLD_MS = 150;

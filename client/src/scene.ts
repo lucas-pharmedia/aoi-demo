@@ -25,7 +25,7 @@ import {
   toGrid,
   gridKey,
   getSurroundingGridKeys,
-} from "./constants.ts";
+} from "../../shared/grid.ts";
 import type { PlayerState, ServerPacket } from "./types.ts";
 import { FpsOverlay } from "./ui/fps.ts";
 
