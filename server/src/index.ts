@@ -1,11 +1,11 @@
 /**
- * AOI 九宮格即時同步伺服器 (單執行緒 - QuickSelect 極速 Top-K 版)
+ * AOI 九宮格即時同步伺服器 (單執行緒 - 極速優化版)
  *
  * 優化重點：
- *   1. QuickSelect 演算法：篩選最近 50 人時間複雜度降至 O(K)，不對前 K 人做無謂的完備排序
- *   2. 原地交換 (In-place Swap)：零記憶體配置 (Zero-Alloc)，不產生任何新物件與 GC 負擔
- *   3. O(1) lastSeenTick 視圖判定：替代 O(N²) Leave 比對
- *   4. 15 Hz (TICK_MS = 67ms) 頻率
+ *   1. setImmediate + performance.now() 自適應遊戲主迴圈 (解決 Timer 漂移)
+ *   2. QuickSelect (中點 Pivot，無 Math.random() 開銷)
+ *   3. 修正獨立 lastSeenTick 追蹤機制 (解決 Leave 判斷失真 Bug)
+ *   4. Zero-Alloc 物件與陣列重用 (降低 GC Spike 頻率)
  */
 import { WebSocketServer, WebSocket } from "ws";
 import {
@@ -19,18 +19,24 @@ import {
 import type { PlayerState, ServerPacket, ClientPacket } from "./types.ts";
 
 const PORT = 8088;
-const TICK_MS = 67; // 15 Hz
+const TICK_RATE = 15; // 15 Hz
+const TICK_MS = 1000 / TICK_RATE; // 66.666ms
 const MOVE_THRESHOLD_SQ = 1 * 1; // 1px 移動門檻平方
 const SNAPSHOT_TICKS = 15; // 15 Ticks = 約 1 秒一次全量快照
 const MAX_AOI_CAP = 50; // 視野最多顯示人數
 
+interface TrackedPlayerInfo {
+  x: number;
+  y: number;
+  lastSeenTick: number;
+}
+
 interface ConnectedPlayer extends PlayerState {
   ws: WebSocket;
   gridId: number;
-  lastKnown: Map<string, { x: number; y: number }>;
+  lastKnown: Map<string, TrackedPlayerInfo>;
   snapOffset: number;
   plain: PlayerState;
-  lastSeenTick: number; // 用於 O(1) 判定 Leave
 }
 
 /** 所有玩家 */
@@ -49,6 +55,7 @@ const tempNearby: ConnectedPlayer[] = [];
 const tempEnters: PlayerState[] = [];
 const tempMoves: PlayerState[] = [];
 const tempLeaves: string[] = [];
+const snapPlayersPool: PlayerState[] = [];
 
 let currentTick = 0;
 let nextId = 1;
@@ -90,7 +97,6 @@ wss.on("connection", (ws) => {
     lastKnown: new Map(),
     snapOffset: nextId % SNAPSHOT_TICKS,
     plain: { id, x, y },
-    lastSeenTick: 0,
   };
 
   players.set(id, player);
@@ -139,7 +145,7 @@ wss.on("connection", (ws) => {
 });
 
 // ----------------------------------------------------------------------
-// QuickSelect 極速 Top-K 演算法 (Zero-Alloc, In-Place Swap)
+// QuickSelect 極速 Top-K 演算法 (無 Math.random, In-Place Swap)
 // ----------------------------------------------------------------------
 
 /** 原地 Partition：以 pivot 為基準，比 pivot 近的換到左邊 */
@@ -185,7 +191,7 @@ function partition(
   return storeIndex;
 }
 
-/** In-Place QuickSelect，時間複雜度 O(K) */
+/** In-Place QuickSelect (改用中點取 Pivot，節省 CPU 開銷) */
 function quickSelectTopK(
   p: ConnectedPlayer,
   arr: ConnectedPlayer[],
@@ -194,7 +200,7 @@ function quickSelectTopK(
   k: number
 ): void {
   while (left < right) {
-    const pivotIndex = left + Math.floor(Math.random() * (right - left + 1));
+    const pivotIndex = (left + right) >> 1; // 中點 Pivot，比 Math.random() 快
     const newPivot = partition(p, arr, left, right, pivotIndex);
 
     if (newPivot === k) {
@@ -219,14 +225,12 @@ function selectNearestAOI(
     return candidateCount;
   }
 
-  // 使用 QuickSelect 原地切分前 maxCap 個，不對 50 人做耗時的全排序
   quickSelectTopK(p, tempNearby, 0, candidateCount - 1, maxCap);
-
   return maxCap;
 }
 
 /**
- * 視圖同步
+ * 視圖同步 (修復獨佔 lastSeenTick)
  */
 function syncViewOptimized(p: ConnectedPlayer, nearbyCount: number): void {
   const lastKnown = p.lastKnown;
@@ -236,14 +240,13 @@ function syncViewOptimized(p: ConnectedPlayer, nearbyCount: number): void {
   // 1. 處理 Enter 與 Move
   for (let i = 0; i < nearbyCount; i++) {
     const q = tempNearby[i];
-    q.lastSeenTick = currentTick; // 標記為當前 Tick 看到
-
     const prev = lastKnown.get(q.id);
 
     if (!prev) {
       tempEnters.push(q.plain);
-      lastKnown.set(q.id, { x: q.x, y: q.y });
+      lastKnown.set(q.id, { x: q.x, y: q.y, lastSeenTick: currentTick });
     } else {
+      prev.lastSeenTick = currentTick; // 標記此玩家的獨立視野在當前 Tick 看到 q
       const dx = q.x - prev.x;
       const dy = q.y - prev.y;
       if (dx * dx + dy * dy >= MOVE_THRESHOLD_SQ) {
@@ -254,11 +257,10 @@ function syncViewOptimized(p: ConnectedPlayer, nearbyCount: number): void {
     }
   }
 
-  // 2. 利用 lastSeenTick O(1) 判定 Leave
+  // 2. 利用各自獨立的 lastSeenTick 做 O(1) 準確判定 Leave
   tempLeaves.length = 0;
-  for (const [id] of lastKnown) {
-    const target = players.get(id);
-    if (!target || target.lastSeenTick !== currentTick) {
+  for (const [id, info] of lastKnown) {
+    if (info.lastSeenTick !== currentTick) {
       tempLeaves.push(id);
     }
   }
@@ -272,33 +274,27 @@ function syncViewOptimized(p: ConnectedPlayer, nearbyCount: number): void {
   if (tempMoves.length > 0) send(p.ws, { type: "move", players: tempMoves });
 }
 
-let lastTickTime = Date.now();
+// ----------------------------------------------------------------------
+// 自適應高精度遊戲主迴圈 (Main Game Loop)
+// ----------------------------------------------------------------------
+
+let lastTime = performance.now();
+let accumulator = 0;
+
 let tickIntervalSum = 0;
 let tickComputeSum = 0;
 let tickCount = 0;
 
-setInterval(() => {
-  const now = Date.now();
-  const interval = now - lastTickTime;
-  lastTickTime = now;
-
-  if (interval > 120) {
-    console.log(
-      `[Single-Opt 15Hz] spike interval=${interval}ms total=${players.size}`
-    );
-  }
-
-  const computeStart = now;
+function updateTick() {
+  const computeStart = performance.now();
   currentTick++;
-  tickIntervalSum += interval;
-  tickCount++;
 
-  // 伺服器 Tick 主迴圈
+  // 伺服器 Tick 主邏輯
   for (const p of players.values()) {
     const aoiIds = getSurroundingGridIds(p.gridId);
     tempNearby.length = 0;
 
-    // 收集九宮格範圍內的玩家
+    // 收集九宮格範圍內的所有玩家
     for (let i = 0; i < aoiIds.length; i++) {
       const bucket = gridBuckets[aoiIds[i]];
       if (bucket) {
@@ -319,19 +315,21 @@ setInterval(() => {
 
     // 定期全量 Snapshot
     if ((currentTick + p.snapOffset) % SNAPSHOT_TICKS === 0) {
-      const snapPlayers: PlayerState[] = [];
+      snapPlayersPool.length = 0;
       for (let i = 0; i < nearbyCount; i++) {
-        snapPlayers.push(tempNearby[i].plain);
+        snapPlayersPool.push(tempNearby[i].plain);
         p.lastKnown.set(tempNearby[i].id, {
           x: tempNearby[i].x,
           y: tempNearby[i].y,
+          lastSeenTick: currentTick,
         });
       }
-      send(p.ws, { type: "update", players: snapPlayers });
+      send(p.ws, { type: "update", players: snapPlayersPool });
     }
   }
 
-  tickComputeSum += Date.now() - computeStart;
+  tickComputeSum += performance.now() - computeStart;
+  tickCount++;
 
   // 每 3 秒印一次健康度 (15 Hz * 3s = 45 Ticks)
   if (currentTick % 45 === 0) {
@@ -344,6 +342,27 @@ setInterval(() => {
     tickComputeSum = 0;
     tickCount = 0;
   }
-}, TICK_MS);
+}
+
+function gameLoop() {
+  const now = performance.now();
+  const deltaTime = now - lastTime;
+  lastTime = now;
+
+  tickIntervalSum += deltaTime;
+  accumulator += deltaTime;
+
+  // 補幀機制：若偶爾發生延遲，自動捕捉並補齊進度，防止時間軸漂移
+  while (accumulator >= TICK_MS) {
+    updateTick();
+    accumulator -= TICK_MS;
+  }
+
+  // 使用 setImmediate 進行下一次 Loop，徹底不佔用/不依賴 setTimeout 漂移
+  setImmediate(gameLoop);
+}
+
+// 啟動主迴圈
+gameLoop();
 
 console.log(`[Single-Opt 15Hz] PID:${process.pid} 啟動於 port ${PORT}`);
