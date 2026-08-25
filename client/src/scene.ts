@@ -1,5 +1,5 @@
 import Phaser from "phaser";
-import { connect, sendMove } from "./network.ts";
+import { connect, sendMove, type BinaryPlayerState } from "./network.ts";
 import { MapManager } from "./world/managers/MapManager.ts";
 import { PlayerManager } from "./world/managers/PlayerManager.ts";
 import { HOME_TILE_MAP_KEY } from "./world/constants/mapConfig.ts";
@@ -25,7 +25,6 @@ import {
   toGrid,
   getSurroundingGridIds,
 } from "../../shared/grid.ts";
-import type { PlayerState, ServerPacket } from "./types.ts";
 import { FpsOverlay } from "./ui/fps.ts";
 
 interface RemotePlayer {
@@ -46,11 +45,11 @@ const REMOTE_FADE_MS = 200;
 export class GameScene extends Phaser.Scene {
   mapManager!: MapManager;
   playerManager: PlayerManager | null = null;
-  private selfId = "";
+  private selfId = 0; // 改用數字 ID
   private aoiOverlay!: Phaser.GameObjects.Graphics;
-  private remotes = new Map<string, RemotePlayer>();
+  private remotes = new Map<number, RemotePlayer>(); // Map Key 改為 number
   private lastSend = 0;
-  private lastGridId = -1; // 改用數字 ID 紀錄上一次的 Grid
+  private lastGridId = -1;
   private lastTotal = -1;
   private fpsOverlay!: FpsOverlay;
 
@@ -71,7 +70,6 @@ export class GameScene extends Phaser.Scene {
   }
 
   create(): void {
-    // 玩家行走動畫註冊要在 Player.create 之前
     registerSpriteWalkAnimations(this, PLAYER_SPRITE_TEXTURE_KEY);
 
     this.mapManager = new MapManager(this);
@@ -79,11 +77,9 @@ export class GameScene extends Phaser.Scene {
     this.playerManager = new PlayerManager(this);
 
     this.drawStaticGrid();
-    // AOI 高亮蓋在地圖物件上面（前景 fg depth=20000）
     this.aoiOverlay = this.add.graphics().setDepth(25000);
-    // 右上角 fps（DOM overlay，CSS 定位，不擋遊戲點擊）
     this.fpsOverlay = new FpsOverlay();
-    // 點擊 → 障礙物走過去、空地 navmesh 尋路
+
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) =>
       this.onPointerDown(pointer)
     );
@@ -131,9 +127,8 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private handleInit(p: Extract<ServerPacket, { type: "init" }>): void {
+  private handleInit(p: { selfId: number; x: number; y: number }): void {
     this.selfId = p.selfId;
-    // server 隨機出生可能落在攤位/牆上，PlayerManager 會拉回可行走區域
     this.playerManager?.createPlayer({ x: p.x, y: p.y });
     const player = this.playerManager?.getPlayer();
     if (player) {
@@ -141,11 +136,10 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private upsertRemote(p: PlayerState): void {
+  private upsertRemote(p: BinaryPlayerState): void {
     const snap = { t: this.time.now, x: p.x, y: p.y };
     const existing = this.remotes.get(p.id);
     if (existing) {
-      // 淡出中又收到包（AOI 邊界抖動）→ 取消淡出、拉回不透明
       if (existing.leaving) {
         existing.leaving = false;
         this.tweens.killTweensOf(existing.sprite);
@@ -158,7 +152,7 @@ export class GameScene extends Phaser.Scene {
         existing.buffer.shift();
       return;
     }
-    // 遠端玩家用同一張 player-sprite，縮放與本地一致；移動中由 lerp 方向播 walk 動畫
+
     const idleFrame = WALK_ANIM_FRAMES.down.start + 1;
     const sprite = this.add
       .sprite(p.x, p.y, PLAYER_SPRITE_TEXTURE_KEY, idleFrame)
@@ -171,10 +165,13 @@ export class GameScene extends Phaser.Scene {
         WORLD_CHARACTER_SHEET_FRAME.frameHeight
     );
     sprite.texture.setFilter(Phaser.Textures.FilterMode.NEAREST);
+
+    // Label 顯示改為 p_${p.id}
     const label = this.add
-      .text(p.x + 16, p.y - 8, p.id, { fontSize: "10px", color: "#8af" })
+      .text(p.x + 16, p.y - 8, `p_${p.id}`, { fontSize: "10px", color: "#8af" })
       .setDepth(10)
       .setAlpha(0);
+
     this.remotes.set(p.id, {
       sprite,
       label,
@@ -182,16 +179,16 @@ export class GameScene extends Phaser.Scene {
       lastDir: "down",
       leaving: false,
     });
-    // 進場淡入
+
     this.tweens.add({ targets: sprite, alpha: 1, duration: REMOTE_FADE_MS });
     this.tweens.add({ targets: label, alpha: 1, duration: REMOTE_FADE_MS });
   }
 
-  private removeRemote(id: string): void {
+  private removeRemote(id: number): void {
     const rp = this.remotes.get(id);
     if (!rp || rp.leaving) return;
     rp.leaving = true;
-    // 出場淡出：淡完才真的 destroy + 從 map 刪除
+
     this.tweens.add({
       targets: [rp.sprite, rp.label],
       alpha: 0,
@@ -204,19 +201,19 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
-  private handleEnter(players: PlayerState[]): void {
+  private handleEnter(players: BinaryPlayerState[]): void {
     for (const p of players) this.upsertRemote(p);
   }
 
-  private handleLeave(ids: string[]): void {
+  private handleLeave(ids: number[]): void {
     for (const id of ids) this.removeRemote(id);
   }
 
-  private handleMove(players: PlayerState[]): void {
+  private handleMove(players: BinaryPlayerState[]): void {
     for (const p of players) this.upsertRemote(p);
   }
 
-  private handleUpdate(players: PlayerState[]): void {
+  private handleUpdate(players: BinaryPlayerState[]): void {
     const seen = new Set(players.map((p) => p.id));
     for (const p of players) this.upsertRemote(p);
     for (const id of [...this.remotes.keys()]) {
@@ -229,7 +226,6 @@ export class GameScene extends Phaser.Scene {
     if (!player) return;
     const world = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
 
-    // 點到障礙物 → 走到其外接矩形底邊中心
     const obstacle = this.mapManager.findObstacleObjectAtWorld(
       world.x,
       world.y
@@ -241,7 +237,6 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    // 點到空地 → navmesh 尋路
     if (this.mapManager.navMesh?.isPointInMesh({ x: world.x, y: world.y })) {
       this.playerManager?.walkToPoint({ x: world.x, y: world.y });
     }
@@ -259,7 +254,6 @@ export class GameScene extends Phaser.Scene {
     const g = this.aoiOverlay;
     g.clear();
 
-    // 走訪畫面上所有網格，若屬於 AOI 則高亮
     for (let r = 0; r < GRID_ROWS; r++) {
       for (let c = 0; c < GRID_COLS; c++) {
         const id = r * GRID_COLS + c;
@@ -278,7 +272,6 @@ export class GameScene extends Phaser.Scene {
     for (const rp of this.remotes.values()) {
       const buf = rp.buffer;
 
-      // 清掉 renderTime 之前的點（留 2 筆當錨點）
       while (buf.length > 2 && buf[1].t < renderTime) buf.shift();
 
       const newest = buf[buf.length - 1];
@@ -289,7 +282,6 @@ export class GameScene extends Phaser.Scene {
         x = newest.x;
         y = newest.y;
       } else {
-        // 找包住 renderTime 的兩點 s1 <= renderTime <= s2
         let s2i = buf.length - 1;
         for (let i = 1; i < buf.length; i++) {
           if (buf[i].t > renderTime) {
@@ -302,12 +294,10 @@ export class GameScene extends Phaser.Scene {
         const seg = s2.t - s1.t || 1;
 
         if (renderTime <= s2.t) {
-          // 純內插：兩個已知點之間平滑移動
           const t = Phaser.Math.Clamp((renderTime - s1.t) / seg, 0, 1);
           x = Phaser.Math.Linear(s1.x, s2.x, t);
           y = Phaser.Math.Linear(s1.y, s2.y, t);
 
-          // 走路動畫：用歷史快照段（s1→s2）位移算方向；沒位移立刻停
           const tdx = s2.x - s1.x;
           const tdy = s2.y - s1.y;
           const moving = Math.hypot(tdx, tdy) > 0.5;
@@ -321,7 +311,6 @@ export class GameScene extends Phaser.Scene {
             rp.sprite.setFrame(WALK_ANIM_FRAMES[rp.lastDir].start + 1);
           }
         } else {
-          // buffer 乾涸：停在最新已知位置
           x = s2.x;
           y = s2.y;
           if (rp.sprite.anims.isPlaying) {
@@ -340,7 +329,6 @@ export class GameScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number): void {
-    // 單幀卡頓偵測：>50ms = 主執行緒卡住
     if (delta > 50 && delta < 1000) {
       console.log(`[FRAME] hitched ${delta.toFixed(0)}ms`);
     }
@@ -353,7 +341,6 @@ export class GameScene extends Phaser.Scene {
     this.lerpRemotes(delta);
     this.drawAoi();
 
-    // 人數 log
     if (this.playerManager?.getPlayer()) {
       const total = 1 + this.remotes.size;
       if (total !== this.lastTotal) {
@@ -364,7 +351,6 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    // 玩家行走中 → 節流發送位置 (約 60fps / 16ms 傳送)
     const player = this.playerManager?.getPlayer();
     if (player && (player.keyboardMoveActive || player.isPathMoving)) {
       const now = this.time.now;

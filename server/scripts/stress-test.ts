@@ -1,28 +1,29 @@
 /**
- * AOI 九宮格伺服器壓力測試
+ * AOI 九宮格伺服器壓力測試 (極速二進位 ArrayBuffer 版)
  *
- * 模擬 N 個線上玩家（每個都像真實客戶端：連 ws → 收 init → 隨機走動 → 每 50ms 送一次 move），
+ * 模擬 N 個線上玩家（每個都像真實客戶端：連 ws → 收二進位 init → 隨機走動 → 每 50ms 送一次二進位 move），
  * 漸增人數，找出「開始卡」的臨界點。
  *
- * 卡頓指標：
- *   - avgInterval：每個 client 收到封包的平均間隔 (ms)。正常 ≈ 50ms（server 每 tick 廣播一次）。
- *     間隔明顯變大 → server 處理跟不上。
- *   - msgs/s：整體吞吐。卡住時吞吐不再隨人數上升。
- *
- * 用法（先啟動 server）：
- *   npm run stress                 # 預設 20 人起步、每 5 秒 +20、上限 300
- *   npm run stress -- --max 500 --step 50 --hold 3000 --url ws://localhost:8088
+ * 用法：
+ *   npm run stress                 # 預設 50 人起步、每 2 秒 +50、上限 800
+ *   npm run stress -- --max 1500 --step 100 --hold 3000 --url ws://localhost:8088
  */
 import WebSocket from "ws";
-import type { ServerPacket } from "../src/types.ts";
 import { MAP_WIDTH, MAP_HEIGHT } from "../../shared/grid.ts";
 
-/** 判斷「卡」：平均封包間隔超過此值 (ms)。正常 50ms 左右。 */
+/** 判斷「卡」：平均封包間隔超過此值 (ms)。正常 66.7ms (15Hz) 左右。 */
 const LAG_THRESHOLD_MS = 150;
 /** 連線後等 init 的逾時 (ms)，超過算失敗 */
 const INIT_TIMEOUT_MS = 5000;
 /** 每個 bot 送 move 的節流 (ms)，跟真實 client 一致 (20/s) */
 const MOVE_INTERVAL_MS = 50;
+
+// ----------------------------------------------------------------------
+// Bot 全域發送專用 Buffer (9 Bytes) - 避免 Bot 端的 GC 影響測量精準度
+// ----------------------------------------------------------------------
+const botSendBuffer = new ArrayBuffer(9);
+const botSendView = new DataView(botSendBuffer);
+botSendView.setUint8(0, 2); // Opcode 2 = Move
 
 function parseArgs(argv: string[]): {
   max: number;
@@ -45,7 +46,7 @@ function parseArgs(argv: string[]): {
 interface Bot {
   id: number;
   ws: WebSocket;
-  selfId: string | null;
+  selfId: number | null; // 改用數字 ID
   x: number;
   y: number;
   vx: number;
@@ -79,6 +80,8 @@ class StressTest {
   /** 啟動連線；init 成功才算該 bot 就緒 */
   private spawnBot(id: number): void {
     const ws = new WebSocket(this.url);
+    ws.binaryType = "arraybuffer"; // ⚠️ 必須設定為二進位模式
+
     const bot: Bot = {
       id,
       ws,
@@ -104,19 +107,26 @@ class StressTest {
       }
     }, INIT_TIMEOUT_MS);
 
-    ws.on("message", (raw) => {
+    ws.on("message", (raw: ArrayBuffer) => {
       const now = Date.now();
+
+      // 二進位封包解碼
+      if (raw.byteLength < 1) return;
+      const view = new DataView(raw);
+      const opcode = view.getUint8(0);
+
       if (!bot.initOk) {
-        const msg = JSON.parse(raw.toString()) as ServerPacket;
-        if (msg.type === "init") {
+        // OP_INIT (1): [1B Opcode][2B SelfId][4B X][4B Y][2B MapW][2B MapH]
+        if (opcode === 1 && raw.byteLength >= 11) {
           bot.initOk = true;
-          bot.selfId = msg.selfId;
-          bot.x = msg.x;
-          bot.y = msg.y;
+          bot.selfId = view.getUint16(1, true);
+          bot.x = view.getFloat32(3, true);
+          bot.y = view.getFloat32(7, true);
           this.connected++;
           clearTimeout(initTimeout);
           this.pickRandomDir(bot);
-          // 就緒後開始送 move（跟真實 client 一樣 20/s）
+
+          // 就緒後開始送二進位 move
           bot.moveTimer = setInterval(
             () => this.sendMove(bot),
             MOVE_INTERVAL_MS
@@ -124,6 +134,7 @@ class StressTest {
         }
         return;
       }
+
       bot.recvCount++;
       this.totalRecv++;
       if (bot.lastRecvAt !== null) {
@@ -160,6 +171,7 @@ class StressTest {
     }, 500 + Math.random() * 1000);
   }
 
+  /** 極速二進位傳送移動封包 */
   private sendMove(bot: Bot): void {
     if (bot.ws.readyState !== WebSocket.OPEN || !bot.initOk) return;
     bot.x = Math.max(
@@ -170,7 +182,10 @@ class StressTest {
       0,
       Math.min(bot.y + bot.vy * (MOVE_INTERVAL_MS / 1000), MAP_HEIGHT)
     );
-    bot.ws.send(JSON.stringify({ type: "move", x: bot.x, y: bot.y }));
+
+    botSendView.setFloat32(1, bot.x, true);
+    botSendView.setFloat32(5, bot.y, true);
+    bot.ws.send(botSendBuffer);
   }
 
   /** 每秒取樣一次：計算吞吐 / 平均封包間隔，判斷是否卡 */
@@ -206,7 +221,7 @@ class StressTest {
   }, 1000);
 
   async run(): Promise<void> {
-    this.log(`AOI stress test → ${this.url}`);
+    this.log(`AOI Binary stress test → ${this.url}`);
     this.log(
       `ramp: start=${this.step} step=${this.step} max=${this.max} hold=${this.holdMs}ms`
     );
@@ -226,7 +241,6 @@ class StressTest {
       `done. max=${total} connected=${this.connected} failed=${this.failed}`
     );
     this.log("最後一列 avgInterval > 150ms 代表該人數下 server 已開始卡。");
-    // process.exit(0);
   }
 
   private sleep(ms: number): Promise<void> {
