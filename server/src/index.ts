@@ -2,11 +2,12 @@
  * AOI 九宮格即時同步伺服器 (單執行緒 - 極速 ArrayBuffer 二進位版)
  *
  * 優化重點：
- *   1. 全二進位通訊 (ArrayBuffer + DataView)：徹底消滅 JSON.stringify 字串 GC
- *   2. 預留全域共享可重用 Buffer (Shared ArrayBuffer)：0 記憶體配置，直接壓低 Compute 時間
- *   3. 數字化 Player ID (Uint16)：省去字串比對與記憶體負擔
- *   4. setImmediate + performance.now() 自適應遊戲主迴圈 (解決 Timer 漂移)
- *   5. QuickSelect (中點 Pivot，無 Math.random() 開銷)
+ *   1. 使用 enum Opcode 規範二進位通訊協定
+ *   2. 全二進位通訊 (ArrayBuffer + DataView)：徹底消滅 JSON.stringify 字串 GC
+ *   3. 預留全域共享可重用 Buffer (Shared ArrayBuffer)：0 記憶體配置，直接壓低 Compute 時間
+ *   4. 數字化 Player ID (Uint16)：省去字串比對與記憶體負擔
+ *   5. setImmediate + performance.now() 自適應遊戲主迴圈 (解決 Timer 漂移)
+ *   6. QuickSelect (中點 Pivot，無 Math.random() 開銷)
  */
 import { WebSocketServer, WebSocket } from "ws";
 import {
@@ -26,13 +27,15 @@ const SNAPSHOT_TICKS = 15; // 15 Ticks = 約 1 秒一次全量快照
 const MAX_AOI_CAP = 50; // 視野最多顯示人數
 
 // ----------------------------------------------------------------------
-// 二進位 Opcode 定義
+// 二進位 Opcode 定義 (Enum 封裝)
 // ----------------------------------------------------------------------
-const OP_INIT = 1;
-const OP_MOVE = 2;
-const OP_ENTER = 3;
-const OP_LEAVE = 4;
-const OP_UPDATE = 5;
+export enum Opcode {
+  Init = 1,
+  Move = 2,
+  Enter = 3,
+  Leave = 4,
+  Update = 5,
+}
 
 // ----------------------------------------------------------------------
 // 全域共享記憶體池與 二進位 Buffer (Zero-Allocation Buffer Pool)
@@ -97,7 +100,7 @@ function removeFromBucket(p: ConnectedPlayer): void {
 /** 發送 Init 封包 [1B Opcode][2B SelfId][4B X][4B Y][2B MapW][2B MapH] (15 Bytes) */
 function sendInitBinary(ws: WebSocket, p: ConnectedPlayer) {
   if (ws.readyState !== WebSocket.OPEN) return;
-  OUT_VIEW.setUint8(0, OP_INIT);
+  OUT_VIEW.setUint8(0, Opcode.Init);
   OUT_VIEW.setUint16(1, p.numId, true);
   OUT_VIEW.setFloat32(3, p.x, true);
   OUT_VIEW.setFloat32(7, p.y, true);
@@ -109,7 +112,7 @@ function sendInitBinary(ws: WebSocket, p: ConnectedPlayer) {
 /** 發送 Enter / Move / Update 複數玩家陣列封包 [1B Opcode][2B Count] + Count * [2B Id][4B X][4B Y] (10 Bytes/Person) */
 function sendPlayerListBinary(
   ws: WebSocket,
-  opcode: number,
+  opcode: Opcode,
   list: ConnectedPlayer[],
   count: number
 ) {
@@ -135,7 +138,7 @@ function sendLeavesBinary(ws: WebSocket, leaveIds: number[]) {
   if (ws.readyState !== WebSocket.OPEN || leaveIds.length === 0) return;
 
   const count = leaveIds.length;
-  OUT_VIEW.setUint8(0, OP_LEAVE);
+  OUT_VIEW.setUint8(0, Opcode.Leave);
   OUT_VIEW.setUint16(1, count, true);
 
   let offset = 3;
@@ -180,9 +183,9 @@ wss.on("connection", (ws) => {
     if (raw.byteLength < 9) return;
 
     const inView = new DataView(raw);
-    const opcode = inView.getUint8(0);
+    const opcode = inView.getUint8(0) as Opcode;
 
-    if (opcode === OP_MOVE) {
+    if (opcode === Opcode.Move) {
       const newX = inView.getFloat32(1, true);
       const newY = inView.getFloat32(5, true);
 
@@ -320,9 +323,9 @@ function syncViewOptimized(p: ConnectedPlayer, nearbyCount: number): void {
   // 發送二進位封包
   if (tempLeaves.length > 0) sendLeavesBinary(p.ws, tempLeaves);
   if (tempEnters.length > 0)
-    sendPlayerListBinary(p.ws, OP_ENTER, tempEnters, tempEnters.length);
+    sendPlayerListBinary(p.ws, Opcode.Enter, tempEnters, tempEnters.length);
   if (tempMoves.length > 0)
-    sendPlayerListBinary(p.ws, OP_MOVE, tempMoves, tempMoves.length);
+    sendPlayerListBinary(p.ws, Opcode.Move, tempMoves, tempMoves.length);
 }
 
 // ----------------------------------------------------------------------
@@ -368,7 +371,7 @@ function updateTick() {
           lastSeenTick: currentTick,
         });
       }
-      sendPlayerListBinary(p.ws, OP_UPDATE, tempNearby, nearbyCount);
+      sendPlayerListBinary(p.ws, Opcode.Update, tempNearby, nearbyCount);
     }
   }
 
