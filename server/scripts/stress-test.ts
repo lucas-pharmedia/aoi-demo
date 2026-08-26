@@ -39,7 +39,8 @@ function parseArgs(argv: string[]): {
     max: Number(get("max") ?? 1000),
     step: Number(get("step") ?? 50),
     hold: Number(get("hold") ?? 2000),
-    url: get("url") ?? "ws://localhost:8088",
+    // url: get("url") ?? "ws://localhost:8088",
+    url: get("url") ?? "ws://43.212.14.218:8088",
   };
 }
 

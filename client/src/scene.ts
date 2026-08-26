@@ -93,7 +93,8 @@ export class GameScene extends Phaser.Scene {
       );
     });
 
-    const wsUrl = `ws://${location.hostname}:8088`;
+    const wsUrl =
+      import.meta.env.VITE_WS_URL ?? `ws://${location.hostname}:8088`;
     connect(wsUrl, {
       onInit: (p) => this.handleInit(p),
       onEnter: (players) => this.handleEnter(players),

@@ -1,0 +1,8 @@
+{
+  "name": "aoi-demo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "rsync -avz --exclude '.temp' --exclude 'node_modules' --exclude 'client' --exclude 'scripts' --exclude 'dist' --exclude '.git' . aoi-bench-test:~/aoi-demo"
+  }
+}
