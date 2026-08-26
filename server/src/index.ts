@@ -25,6 +25,7 @@ const TICK_MS = 1000 / TICK_RATE; // 66.666ms
 const MOVE_THRESHOLD_SQ = 1 * 1; // 1px 移動門檻平方
 const SNAPSHOT_TICKS = 15; // 15 Ticks = 約 1 秒一次全量快照
 const MAX_AOI_CAP = 50; // 視野最多顯示人數
+const HEARTBEAT_MS = 10_000; // 10s 探活一次；連續兩輪無 pong ≈ 20s 踢除
 
 // ----------------------------------------------------------------------
 // 二進位 Opcode 定義 (Enum 封裝)
@@ -57,6 +58,8 @@ interface ConnectedPlayer {
   gridId: number;
   lastKnown: Map<number, TrackedPlayerInfo>;
   snapOffset: number;
+  /** WebSocket ping/pong 探活；heartbeat 輪到時先清 false，收到 pong 再設回 true */
+  isAlive: boolean;
 }
 
 /** 所有玩家 */
@@ -91,6 +94,12 @@ function removeFromBucket(p: ConnectedPlayer): void {
   const bucket = gridBuckets[p.gridId];
   const idx = bucket.indexOf(p);
   if (idx >= 0) bucket.splice(idx, 1);
+}
+
+/** 同步從 players / gridBuckets 卸下玩家；可重入（heartbeat + close 都可能呼叫） */
+function detachPlayer(p: ConnectedPlayer): void {
+  if (!players.delete(p.numId)) return;
+  removeFromBucket(p);
 }
 
 // ----------------------------------------------------------------------
@@ -171,12 +180,17 @@ wss.on("connection", (ws) => {
     gridId: gId,
     lastKnown: new Map(),
     snapOffset: numId % SNAPSHOT_TICKS,
+    isAlive: true,
   };
 
   players.set(numId, player);
   addToBucket(player);
 
   sendInitBinary(ws, player);
+
+  ws.on("pong", () => {
+    player.isAlive = true;
+  });
 
   ws.on("message", (raw: ArrayBuffer) => {
     // 接收 Client 移動二進位封包 [1B Opcode (2)][4B X][4B Y] (共 9 Bytes)
@@ -204,10 +218,33 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
-    players.delete(numId);
-    removeFromBucket(player);
+    detachPlayer(player);
   });
 });
+
+// ----------------------------------------------------------------------
+// WebSocket 心跳探活 (ping / pong → ConnectedPlayer.isAlive)
+// ----------------------------------------------------------------------
+
+const heartbeatTimer = setInterval(() => {
+  for (const p of players.values()) {
+    if (!p.isAlive) {
+      console.warn(`[HB] Player p_${p.numId} 無 pong，踢除`);
+      // terminate() 的 close 是 async；先同步卸資源，避免 tick 仍掃到殭屍
+      detachPlayer(p);
+      p.ws.terminate();
+      continue;
+    }
+    p.isAlive = false;
+    if (p.ws.readyState === WebSocket.OPEN) {
+      p.ws.ping();
+    }
+  }
+}, HEARTBEAT_MS);
+
+heartbeatTimer.unref?.();
+
+wss.on("close", () => clearInterval(heartbeatTimer));
 
 // ----------------------------------------------------------------------
 // QuickSelect 極速 Top-K (In-Place Swap)
