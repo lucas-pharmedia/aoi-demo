@@ -36,7 +36,7 @@ function parseArgs(argv: string[]): {
     return i >= 0 ? argv[i + 1] : undefined;
   };
   return {
-    max: Number(get("max") ?? 800),
+    max: Number(get("max") ?? 1000),
     step: Number(get("step") ?? 50),
     hold: Number(get("hold") ?? 2000),
     url: get("url") ?? "ws://localhost:8088",
