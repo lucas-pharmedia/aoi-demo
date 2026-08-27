@@ -84,7 +84,7 @@ const tempLeaves: number[] = [];
 let currentTick = 0;
 let nextNumId = 1;
 let bufferedWarningCount = 0;
-const wss = new WebSocketServer({ port: PORT });
+const wss = new WebSocketServer({ port: PORT, backlog: 2048 });
 
 function randomSpawn(): { x: number; y: number } {
   const x = Math.random() * (MAP_WIDTH - 64) + 32;
