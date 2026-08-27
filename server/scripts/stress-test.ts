@@ -17,6 +17,11 @@ const LAG_THRESHOLD_MS = 150;
 const INIT_TIMEOUT_MS = 5000;
 /** 每個 bot 送 move 的節流 (ms)，跟真實 client 一致 (20/s) */
 const MOVE_INTERVAL_MS = 50;
+/** true = 常態走動；false = 集中一點 */
+const BOT_NORMAL_WALK = true;
+const CLUSTER_CENTER_X = 2000;
+const CLUSTER_CENTER_Y = 2000;
+const CLUSTER_SPREAD = 100;
 
 // ----------------------------------------------------------------------
 // Bot 全域發送專用 Buffer (9 Bytes) - 避免 Bot 端的 GC 影響測量精準度
@@ -175,17 +180,19 @@ class StressTest {
   /** 極速二進位傳送移動封包 */
   private sendMove(bot: Bot): void {
     if (bot.ws.readyState !== WebSocket.OPEN || !bot.initOk) return;
-    bot.x = Math.max(
-      0,
-      Math.min(bot.x + bot.vx * (MOVE_INTERVAL_MS / 1000), MAP_WIDTH)
-    );
-    bot.y = Math.max(
-      0,
-      Math.min(bot.y + bot.vy * (MOVE_INTERVAL_MS / 1000), MAP_HEIGHT)
-    );
-
-    // bot.x = 2000 + (Math.random() - 0.5) * 60;
-    // bot.y = 2000 + (Math.random() - 0.5) * 60;
+    if (BOT_NORMAL_WALK) {
+      bot.x = Math.max(
+        0,
+        Math.min(bot.x + bot.vx * (MOVE_INTERVAL_MS / 1000), MAP_WIDTH)
+      );
+      bot.y = Math.max(
+        0,
+        Math.min(bot.y + bot.vy * (MOVE_INTERVAL_MS / 1000), MAP_HEIGHT)
+      );
+    } else {
+      bot.x = CLUSTER_CENTER_X + (Math.random() - 0.5) * CLUSTER_SPREAD;
+      bot.y = CLUSTER_CENTER_Y + (Math.random() - 0.5) * CLUSTER_SPREAD;
+    }
 
     botSendView.setFloat32(1, bot.x, true);
     botSendView.setFloat32(5, bot.y, true);
