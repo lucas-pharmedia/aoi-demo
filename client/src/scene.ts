@@ -138,7 +138,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private upsertRemote(p: BinaryPlayerState): void {
-    const snap = { t: this.time.now, x: p.x, y: p.y };
+    const snap = { t: performance.now(), x: p.x, y: p.y };
     const existing = this.remotes.get(p.id);
     if (existing) {
       if (existing.leaving) {
@@ -269,7 +269,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private lerpRemotes(_delta: number): void {
-    const renderTime = this.time.now - BUFFER_DELAY_MS;
+    const renderTime = performance.now() - BUFFER_DELAY_MS;
     for (const rp of this.remotes.values()) {
       const buf = rp.buffer;
 
@@ -324,7 +324,7 @@ export class GameScene extends Phaser.Scene {
       rp.sprite.x = x;
       rp.sprite.y = y;
       rp.sprite.setDepth(rp.sprite.y);
-      rp.label.setPosition(rp.sprite.x + 16, rp.sprite.y - 8);
+      // rp.label.setPosition(rp.sprite.x + 16, rp.sprite.y - 8);
       rp.label.setDepth(rp.sprite.y + 1);
     }
   }
@@ -346,9 +346,9 @@ export class GameScene extends Phaser.Scene {
       const total = 1 + this.remotes.size;
       if (total !== this.lastTotal) {
         this.lastTotal = total;
-        console.log(
-          `[AOI] 地圖上人數: ${total} (自己 1 + 遠端 ${this.remotes.size})`
-        );
+        // console.log(
+        //   `[AOI] 地圖上人數: ${total} (自己 1 + 遠端 ${this.remotes.size})`
+        // );
       }
     }
 

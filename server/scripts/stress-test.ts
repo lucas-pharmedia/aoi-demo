@@ -36,11 +36,11 @@ function parseArgs(argv: string[]): {
     return i >= 0 ? argv[i + 1] : undefined;
   };
   return {
-    max: Number(get("max") ?? 1000),
+    max: Number(get("max") ?? 800),
     step: Number(get("step") ?? 50),
     hold: Number(get("hold") ?? 2000),
     // url: get("url") ?? "ws://localhost:8088",
-    url: get("url") ?? "ws://43.212.14.218:8088",
+    url: get("url") ?? "ws://43.212.31.124:8088",
   };
 }
 
@@ -183,6 +183,9 @@ class StressTest {
       0,
       Math.min(bot.y + bot.vy * (MOVE_INTERVAL_MS / 1000), MAP_HEIGHT)
     );
+
+    // bot.x = 2000 + (Math.random() - 0.5) * 60;
+    // bot.y = 2000 + (Math.random() - 0.5) * 60;
 
     botSendView.setFloat32(1, bot.x, true);
     botSendView.setFloat32(5, bot.y, true);
