@@ -5,8 +5,8 @@
  * 漸增人數，找出「開始卡」的臨界點。
  *
  * 用法：
- *   npm run stress                 # 預設 50 人起步、每 2 秒 +50、上限 800
- *   npm run stress -- --max 1500 --step 100 --hold 3000 --url ws://localhost:8088
+ *   npm run stress
+ *   調整 STRESS_MAX / STRESS_STEP / STRESS_HOLD_MS 常數即可
  */
 import WebSocket from "ws";
 import { MAP_WIDTH, MAP_HEIGHT } from "../../shared/grid.ts";
@@ -22,6 +22,12 @@ const BOT_NORMAL_WALK = true;
 const CLUSTER_CENTER_X = 2000;
 const CLUSTER_CENTER_Y = 2000;
 const CLUSTER_SPREAD = 100;
+/** 壓測上限人數 */
+const STRESS_MAX = 800;
+/** 每批新增人數 */
+const STRESS_STEP = 30;
+/** 每批新增後等待時間 (ms) */
+const STRESS_HOLD_MS = 2000;
 
 // ----------------------------------------------------------------------
 // Bot 全域發送專用 Buffer (9 Bytes) - 避免 Bot 端的 GC 影響測量精準度
@@ -30,23 +36,9 @@ const botSendBuffer = new ArrayBuffer(9);
 const botSendView = new DataView(botSendBuffer);
 botSendView.setUint8(0, 2); // Opcode 2 = Move
 
-function parseArgs(argv: string[]): {
-  max: number;
-  step: number;
-  hold: number;
-  url: string;
-} {
-  const get = (name: string): string | undefined => {
-    const i = argv.indexOf(`--${name}`);
-    return i >= 0 ? argv[i + 1] : undefined;
-  };
-  return {
-    max: Number(get("max") ?? 800),
-    step: Number(get("step") ?? 50),
-    hold: Number(get("hold") ?? 2000),
-    // url: get("url") ?? "ws://localhost:8088",
-    url: get("url") ?? "ws://43.212.31.124:8088",
-  };
+function parseUrl(argv: string[]): string {
+  const i = argv.indexOf("--url");
+  return i >= 0 ? argv[i + 1]! : "ws://43.212.31.124:8088";
 }
 
 interface Bot {
@@ -259,6 +251,6 @@ class StressTest {
   }
 }
 
-const args = parseArgs(process.argv.slice(2));
-const test = new StressTest(args.url, args.max, args.step, args.hold);
+const url = parseUrl(process.argv.slice(2));
+const test = new StressTest(url, STRESS_MAX, STRESS_STEP, STRESS_HOLD_MS);
 void test.run();

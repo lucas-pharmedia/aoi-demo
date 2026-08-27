@@ -482,4 +482,6 @@ function gameLoop() {
 
 gameLoop();
 
-console.log(`[Binary-Opt 15Hz] PID:${process.pid} 啟動於 port ${PORT}`);
+console.log(
+  `[Binary-Opt 15Hz] PID:${process.pid} 啟動於 port ${PORT}, AOI_CAP=${MAX_AOI_CAP}`
+);
