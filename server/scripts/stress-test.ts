@@ -77,7 +77,7 @@ class StressTest {
 
   /** 啟動連線；init 成功才算該 bot 就緒 */
   private spawnBot(id: number): void {
-    const ws = new WebSocket(this.url);
+    const ws = new WebSocket(this.url, { handshakeTimeout: 15000 });
     ws.binaryType = "arraybuffer"; // ⚠️ 必須設定為二進位模式
 
     const bot: Bot = {
