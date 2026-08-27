@@ -35,8 +35,10 @@ interface Handlers {
 }
 
 let ws: WebSocket | null = null;
+let wsUrl: string | null = null;
 let handlers: Handlers | null = null;
 let retryTimer: number | null = null;
+let paused = false;
 let lastPacketAt: number | null = null;
 let gapWindowStart = 0;
 let gapBuckets = { g60: 0, g100: 0, g200: 0 };
@@ -48,8 +50,31 @@ const sendMoveBuffer = new ArrayBuffer(9);
 const sendMoveView = new DataView(sendMoveBuffer);
 sendMoveView.setUint8(0, Opcode.Move); // 自動綁定 Opcode.Move (2)
 
+function clearRetryTimer(): void {
+  if (retryTimer !== null) {
+    window.clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+}
+
+export function disconnect(): void {
+  paused = true;
+  clearRetryTimer();
+  ws?.close();
+  ws = null;
+}
+
 export function connect(url: string, h: Handlers): void {
+  wsUrl = url;
   handlers = h;
+  paused = false;
+  clearRetryTimer();
+
+  if (ws) {
+    ws.close();
+    ws = null;
+  }
+
   ws = new WebSocket(url);
   ws.binaryType = "arraybuffer"; // 必須設定為 arraybuffer 以解二進位包
 
@@ -143,14 +168,46 @@ export function connect(url: string, h: Handlers): void {
   };
 
   ws.onclose = () => {
+    ws = null;
+    if (paused || !handlers || !wsUrl) return;
     console.warn("[network] disconnected, retrying in 1s");
-    if (retryTimer !== null) window.clearTimeout(retryTimer);
     retryTimer = window.setTimeout(() => {
-      if (handlers) connect(url, handlers);
+      if (handlers && wsUrl) connect(wsUrl, handlers);
     }, 1000);
   };
 
   ws.onerror = () => ws?.close();
+}
+
+/** 分頁切回前景時重連（須先 reset scene 狀態） */
+export function reconnect(): void {
+  if (!handlers || !wsUrl) return;
+  paused = false;
+  if (ws && ws.readyState !== WebSocket.CLOSED) return;
+  connect(wsUrl, handlers);
+}
+
+/** 分頁 hidden 斷線、visible 重連；回傳 cleanup 供 scene shutdown 用 */
+export function setupVisibilityReconnect(onVisible?: () => void): () => void {
+  const onVisibilityChange = (): void => {
+    if (document.visibilityState === "hidden") {
+      console.log("[network] tab hidden, disconnecting");
+      disconnect();
+      return;
+    }
+    if (document.visibilityState !== "visible") return;
+    console.log("[network] tab visible, reconnecting");
+    onVisible?.();
+    reconnect();
+  };
+
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  return () => {
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+    disconnect();
+    handlers = null;
+    wsUrl = null;
+  };
 }
 
 /** 極速 Zero-Alloc 發送移動封包 (Float32 點) */

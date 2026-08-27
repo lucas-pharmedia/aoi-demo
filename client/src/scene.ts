@@ -1,5 +1,10 @@
 import Phaser from "phaser";
-import { connect, sendMove, type BinaryPlayerState } from "./network.ts";
+import {
+  connect,
+  sendMove,
+  setupVisibilityReconnect,
+  type BinaryPlayerState,
+} from "./network.ts";
 import { MapManager } from "./world/managers/MapManager.ts";
 import { PlayerManager } from "./world/managers/PlayerManager.ts";
 import { HOME_TILE_MAP_KEY } from "./world/constants/mapConfig.ts";
@@ -52,6 +57,7 @@ export class GameScene extends Phaser.Scene {
   private lastGridId = -1;
   private lastTotal = -1;
   private fpsOverlay!: FpsOverlay;
+  private teardownNetwork: (() => void) | null = null;
 
   constructor() {
     super("game");
@@ -91,6 +97,8 @@ export class GameScene extends Phaser.Scene {
       this.scale.off("resize", () =>
         this.playerManager?.recenterCameraOnPlayer()
       );
+      this.teardownNetwork?.();
+      this.teardownNetwork = null;
     });
 
     const wsUrl =
@@ -102,6 +110,26 @@ export class GameScene extends Phaser.Scene {
       onMove: (players) => this.handleMove(players),
       onUpdate: (players) => this.handleUpdate(players),
     });
+    this.teardownNetwork = setupVisibilityReconnect(() =>
+      this.resetWorldForReconnect()
+    );
+  }
+
+  /** 分頁切回前景重連前清場，等同重開網頁的 client 狀態 */
+  private resetWorldForReconnect(): void {
+    for (const rp of this.remotes.values()) {
+      this.tweens.killTweensOf(rp.sprite);
+      this.tweens.killTweensOf(rp.label);
+      rp.sprite.destroy();
+      rp.label.destroy();
+    }
+    this.remotes.clear();
+    this.playerManager?.destroyPlayer();
+    this.aoiOverlay?.clear();
+    this.selfId = 0;
+    this.lastGridId = -1;
+    this.lastTotal = -1;
+    this.lastSend = 0;
   }
 
   private drawStaticGrid(): void {

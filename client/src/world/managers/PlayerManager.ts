@@ -31,7 +31,17 @@ export class PlayerManager {
     return this.player;
   }
 
+  destroyPlayer(): void {
+    if (!this.player) return;
+    const { sprite } = this.player;
+    this.scene.cameras.main.stopFollow();
+    this.scene.tweens.killTweensOf(sprite);
+    sprite.destroy();
+    this.player = null;
+  }
+
   createPlayer(spawnPoint: Point): void {
+    this.destroyPlayer();
     const { map, navMesh } = this.scene.mapManager;
 
     // 不論來源，最終必須落在可行走範圍；否則改用 navMesh 隨機點
