@@ -24,7 +24,7 @@ const TICK_RATE = 15; // 15 Hz
 const TICK_MS = 1000 / TICK_RATE; // 66.666ms
 const MOVE_THRESHOLD_SQ = 1 * 1; // 1px 移動門檻平方
 const SNAPSHOT_TICKS = 15; // 15 Ticks = 約 1 秒一次全量快照
-const MAX_AOI_CAP = 50; // 視野最多顯示人數
+const MAX_AOI_CAP = 30; // 視野最多顯示人數
 const HEARTBEAT_MS = 10_000; // 10s 探活一次；連續兩輪無 pong ≈ 20s 踢除
 
 /** 64 KB：網路積壓防衛，超過則丟本幀廣播，保護 server RAM */
