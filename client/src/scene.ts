@@ -34,25 +34,26 @@ import { FpsOverlay } from "./ui/fps.ts";
 
 interface RemotePlayer {
   sprite: Phaser.GameObjects.Sprite;
-  label: Phaser.GameObjects.Text;
   buffer: { t: number; x: number; y: number }[];
   lastDir: Direction;
   leaving: boolean;
 }
 
-/** 內插緩衝區：伺服器改成 15 Hz (67ms) 後，建議設為 130ms，抗 Jitter 與平滑度最佳 */
+/** 內插緩衝區：伺服器 15 Hz (67ms)，建議設為 130ms，抗 Jitter 與平滑度最佳 */
 const BUFFER_DELAY_MS = 130;
 /** 緩衝區最多留幾筆快照（60Hz * 2s） */
 const MAX_BUFFER_SNAPSHOTS = 120;
 /** 遠端進出場淡入/淡出時間 */
 const REMOTE_FADE_MS = 200;
+/** 前端向伺服器發送移動位置的最小間隔 (ms) - 設為 45ms (~22Hz) 可與 15Hz 伺服器完美匹配 */
+const SEND_MOVE_INTERVAL_MS = 45;
 
 export class GameScene extends Phaser.Scene {
   mapManager!: MapManager;
   playerManager: PlayerManager | null = null;
-  private selfId = 0; // 改用數字 ID
+  private selfId = 0; // 數字 ID
   private aoiOverlay!: Phaser.GameObjects.Graphics;
-  private remotes = new Map<number, RemotePlayer>(); // Map Key 改為 number
+  private remotes = new Map<number, RemotePlayer>();
   private lastSend = 0;
   private lastGridId = -1;
   private lastTotal = -1;
@@ -119,9 +120,7 @@ export class GameScene extends Phaser.Scene {
   private resetWorldForReconnect(): void {
     for (const rp of this.remotes.values()) {
       this.tweens.killTweensOf(rp.sprite);
-      this.tweens.killTweensOf(rp.label);
       rp.sprite.destroy();
-      rp.label.destroy();
     }
     this.remotes.clear();
     this.playerManager?.destroyPlayer();
@@ -166,15 +165,16 @@ export class GameScene extends Phaser.Scene {
   }
 
   private upsertRemote(p: BinaryPlayerState): void {
+    // 🟢 核心修正 1：如果廣播包裡的 ID 是自己，直接過濾跳過！
+    if (p.id === this.selfId || this.selfId === 0) return;
+
     const snap = { t: performance.now(), x: p.x, y: p.y };
     const existing = this.remotes.get(p.id);
     if (existing) {
       if (existing.leaving) {
         existing.leaving = false;
         this.tweens.killTweensOf(existing.sprite);
-        this.tweens.killTweensOf(existing.label);
         existing.sprite.setAlpha(1);
-        existing.label.setAlpha(1);
       }
       existing.buffer.push(snap);
       if (existing.buffer.length > MAX_BUFFER_SNAPSHOTS)
@@ -195,22 +195,14 @@ export class GameScene extends Phaser.Scene {
     );
     sprite.texture.setFilter(Phaser.Textures.FilterMode.NEAREST);
 
-    // Label 顯示改為 p_${p.id}
-    const label = this.add
-      .text(p.x + 16, p.y - 8, `p_${p.id}`, { fontSize: "10px", color: "#8af" })
-      .setDepth(10)
-      .setAlpha(0);
-
     this.remotes.set(p.id, {
       sprite,
-      label,
       buffer: [snap],
       lastDir: "down",
       leaving: false,
     });
 
     this.tweens.add({ targets: sprite, alpha: 1, duration: REMOTE_FADE_MS });
-    this.tweens.add({ targets: label, alpha: 1, duration: REMOTE_FADE_MS });
   }
 
   private removeRemote(id: number): void {
@@ -219,12 +211,11 @@ export class GameScene extends Phaser.Scene {
     rp.leaving = true;
 
     this.tweens.add({
-      targets: [rp.sprite, rp.label],
+      targets: rp.sprite,
       alpha: 0,
       duration: REMOTE_FADE_MS,
       onComplete: () => {
         rp.sprite.destroy();
-        rp.label.destroy();
         this.remotes.delete(id);
       },
     });
@@ -352,8 +343,6 @@ export class GameScene extends Phaser.Scene {
       rp.sprite.x = x;
       rp.sprite.y = y;
       rp.sprite.setDepth(rp.sprite.y);
-      // rp.label.setPosition(rp.sprite.x + 16, rp.sprite.y - 8);
-      rp.label.setDepth(rp.sprite.y + 1);
     }
   }
 
@@ -374,16 +363,14 @@ export class GameScene extends Phaser.Scene {
       const total = 1 + this.remotes.size;
       if (total !== this.lastTotal) {
         this.lastTotal = total;
-        // console.log(
-        //   `[AOI] 地圖上人數: ${total} (自己 1 + 遠端 ${this.remotes.size})`
-        // );
       }
     }
 
     const player = this.playerManager?.getPlayer();
     if (player && (player.keyboardMoveActive || player.isPathMoving)) {
       const now = this.time.now;
-      if (now - this.lastSend >= 16) {
+      // 🟢 核心修正 2：發送間隔改為 45ms，避免極高頻率發送造成 upstream 佇列塞車
+      if (now - this.lastSend >= SEND_MOVE_INTERVAL_MS) {
         sendMove(player.sprite.x, player.sprite.y);
         this.lastSend = now;
       }

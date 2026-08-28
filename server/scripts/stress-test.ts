@@ -29,7 +29,7 @@ const STRESS_STEP = 20;
 /** 每批新增後等待時間 (ms) */
 const STRESS_HOLD_MS = 2000;
 /** 壓測目標 WebSocket URL */
-const STRESS_URL = "ws://43.212.31.124:8088";
+const STRESS_URL = "ws://43.212.240.174:8088";
 
 // ----------------------------------------------------------------------
 // Bot 全域發送專用 Buffer (9 Bytes) - 避免 Bot 端的 GC 影響測量精準度
@@ -115,8 +115,12 @@ class StressTest {
       if (bot.dirTimer) clearTimeout(bot.dirTimer);
 
       try {
-        ws.removeAllListeners();
-        ws.close();
+        // 安全銷毀 socket，防止未連線關閉觸發 unhandled exception
+        if (ws.readyState === WebSocket.CONNECTING) {
+          ws.terminate();
+        } else {
+          ws.close();
+        }
       } catch (e) {}
 
       // 只有在尚未 Init 成功的情況下失敗，才增加 failed 計數
@@ -138,6 +142,13 @@ class StressTest {
         retry();
       }
     }, INIT_TIMEOUT_MS);
+
+    // 預先抓取所有錯誤防止 Node.js 崩潰
+    ws.on("error", (err) => {
+      if (!bot.initOk) {
+        retry();
+      }
+    });
 
     ws.on("message", (raw: ArrayBuffer) => {
       const now = Date.now();
@@ -176,19 +187,8 @@ class StressTest {
       bot.lastRecvAt = now;
     });
 
-    ws.on("error", () => {
-      if (!bot.initOk) {
-        retry();
-      }
-    });
-
     ws.on("close", () => {
-      if (!bot.initOk) {
-        retry();
-      } else {
-        // 如果是已連線成功的 bot 斷線，進行重連復原
-        retry();
-      }
+      retry();
     });
   }
 
@@ -267,7 +267,11 @@ class StressTest {
     let total = 0;
     while (total < this.max) {
       const batch = Math.min(this.step, this.max - total);
-      for (let i = 0; i < batch; i++) this.spawnBot(total + i);
+      for (let i = 0; i < batch; i++) {
+        this.spawnBot(total + i);
+        // 每建立一個連線停 15ms，避免壓測機 Socket 瞬間衝爆
+        await this.sleep(15);
+      }
       total += batch;
       // 等一批連上 + 穩定跑一個 hold 期間
       await this.sleep(this.holdMs);
