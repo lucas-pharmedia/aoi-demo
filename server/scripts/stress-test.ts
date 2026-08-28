@@ -6,7 +6,7 @@
  *
  * 用法：
  *   npm run stress
- *   調整 STRESS_MAX / STRESS_STEP / STRESS_HOLD_MS 常數即可
+ *   調整 STRESS_URL / STRESS_MAX / STRESS_STEP / STRESS_HOLD_MS 常數即可
  */
 import WebSocket from "ws";
 import { MAP_WIDTH, MAP_HEIGHT } from "../../shared/grid.ts";
@@ -23,11 +23,13 @@ const CLUSTER_CENTER_X = 2200;
 const CLUSTER_CENTER_Y = 2200;
 const CLUSTER_SPREAD = 600;
 /** 壓測上限人數 */
-const STRESS_MAX = 1000;
+const STRESS_MAX = 800;
 /** 每批新增人數 */
 const STRESS_STEP = 20;
 /** 每批新增後等待時間 (ms) */
 const STRESS_HOLD_MS = 2000;
+/** 壓測目標 WebSocket URL */
+const STRESS_URL = "ws://43.212.31.124:8088";
 
 // ----------------------------------------------------------------------
 // Bot 全域發送專用 Buffer (9 Bytes) - 避免 Bot 端的 GC 影響測量精準度
@@ -35,11 +37,6 @@ const STRESS_HOLD_MS = 2000;
 const botSendBuffer = new ArrayBuffer(9);
 const botSendView = new DataView(botSendBuffer);
 botSendView.setUint8(0, 2); // Opcode 2 = Move
-
-function parseUrl(argv: string[]): string {
-  const i = argv.indexOf("--url");
-  return i >= 0 ? argv[i + 1]! : "ws://43.212.31.124:8088";
-}
 
 interface Bot {
   id: number;
@@ -288,6 +285,10 @@ class StressTest {
   }
 }
 
-const url = parseUrl(process.argv.slice(2));
-const test = new StressTest(url, STRESS_MAX, STRESS_STEP, STRESS_HOLD_MS);
+const test = new StressTest(
+  STRESS_URL,
+  STRESS_MAX,
+  STRESS_STEP,
+  STRESS_HOLD_MS
+);
 void test.run();
