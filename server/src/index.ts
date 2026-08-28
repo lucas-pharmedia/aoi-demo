@@ -6,7 +6,7 @@
  *   2. 全二進位通訊 (ArrayBuffer + DataView)：徹底消滅 JSON.stringify 字串 GC
  *   3. 預留全域共享可重用 Buffer (Shared ArrayBuffer)：0 記憶體配置，直接壓低 Compute 時間
  *   4. 數字化 Player ID (Uint16)：省去字串比對與記憶體負擔
- *   5. setImmediate + performance.now() 自適應遊戲主迴圈 (解決 Timer 漂移)
+ *   5. 休眠型自適應遊戲主迴圈 (解決 setImmediate 導致 CPU 100% 空轉與 Timer 漂移)
  *   6. QuickSelect (中點 Pivot，無 Math.random() 開銷)
  */
 import { WebSocketServer, WebSocket } from "ws";
@@ -413,8 +413,12 @@ let tickComputeSum = 0;
 let tickCount = 0;
 
 function updateTick() {
-  const computeStart = performance.now();
   currentTick++;
+
+  // 【修復點 1】：無人連線時直接 return，不執行任何 AOI 計算
+  if (players.size === 0) return;
+
+  const computeStart = performance.now();
 
   for (const p of players.values()) {
     const aoiIds = getSurroundingGridIds(p.gridId);
@@ -451,7 +455,7 @@ function updateTick() {
   tickComputeSum += performance.now() - computeStart;
   tickCount++;
 
-  if (currentTick % 45 === 0) {
+  if (currentTick % 45 === 0 && tickCount > 0) {
     const avgInterval = (tickIntervalSum / tickCount).toFixed(1);
     const avgCompute = (tickComputeSum / tickCount).toFixed(1);
     console.log(
@@ -477,7 +481,9 @@ function gameLoop() {
     accumulator -= TICK_MS;
   }
 
-  setImmediate(gameLoop);
+  // 【修復點 2】：計算距離下一次 Tick 的剩餘時間，使用 setTimeout 讓 CPU 在空檔休眠
+  const nextDelay = Math.max(0, TICK_MS - accumulator);
+  setTimeout(gameLoop, nextDelay);
 }
 
 gameLoop();
