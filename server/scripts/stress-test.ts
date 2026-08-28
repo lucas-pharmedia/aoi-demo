@@ -1,5 +1,5 @@
 /**
- * AOI 九宮格伺服器壓力測試 (極速二進位 ArrayBuffer 版)
+ * AOI 九宮格伺服器壓力測試 (極速二進位 ArrayBuffer 版 - 具備自動重連機制)
  *
  * 模擬 N 個線上玩家（每個都像真實客戶端：連 ws → 收二進位 init → 隨機走動 → 每 50ms 送一次二進位 move），
  * 漸增人數，找出「開始卡」的臨界點。
@@ -13,12 +13,12 @@ import { MAP_WIDTH, MAP_HEIGHT } from "../../shared/grid.ts";
 
 /** 判斷「卡」：平均封包間隔超過此值 (ms)。正常 66.7ms (15Hz) 左右。 */
 const LAG_THRESHOLD_MS = 150;
-/** 連線後等 init 的逾時 (ms)，超過算失敗 */
+/** 連線後等 init 的逾時 (ms)，超過算失敗並重連 */
 const INIT_TIMEOUT_MS = 5000;
 /** 每個 bot 送 move 的節流 (ms)，跟真實 client 一致 (20/s) */
 const MOVE_INTERVAL_MS = 50;
 /** true = 常態走動；false = 集中一點 */
-const BOT_NORMAL_WALK = true;
+const BOT_NORMAL_WALK = false;
 const CLUSTER_CENTER_X = 2200;
 const CLUSTER_CENTER_Y = 2200;
 const CLUSTER_SPREAD = 600;
@@ -44,7 +44,7 @@ function parseUrl(argv: string[]): string {
 interface Bot {
   id: number;
   ws: WebSocket;
-  selfId: number | null; // 改用數字 ID
+  selfId: number | null;
   x: number;
   y: number;
   vx: number;
@@ -75,7 +75,7 @@ class StressTest {
     this.log = (msg: string) => console.log(msg);
   }
 
-  /** 啟動連線；init 成功才算該 bot 就緒 */
+  /** 啟動連線；init 失敗或斷線自動觸發重連 */
   private spawnBot(id: number): void {
     const ws = new WebSocket(this.url, { handshakeTimeout: 15000 });
     ws.binaryType = "arraybuffer"; // ⚠️ 必須設定為二進位模式
@@ -96,12 +96,49 @@ class StressTest {
       initOk: false,
       moveTimer: null,
     };
-    this.bots.push(bot);
+
+    // 尋找陣列中是否已有該 id 的舊 bot 物件，重連時覆蓋以維持佇列正確
+    const existingIndex = this.bots.findIndex((b) => b.id === id);
+    if (existingIndex >= 0) {
+      this.bots[existingIndex] = bot;
+    } else {
+      this.bots.push(bot);
+    }
+
+    // 防重複觸發 Lock Flag
+    let hasRetried = false;
+
+    // 統一重試邏輯 (清除資源 + 亂數延遲重發)
+    const retry = () => {
+      if (hasRetried) return;
+      hasRetried = true;
+
+      clearTimeout(initTimeout);
+      if (bot.moveTimer) clearInterval(bot.moveTimer);
+      if (bot.dirTimer) clearTimeout(bot.dirTimer);
+
+      try {
+        ws.removeAllListeners();
+        ws.close();
+      } catch (e) {}
+
+      // 只有在尚未 Init 成功的情況下失敗，才增加 failed 計數
+      if (!bot.initOk) {
+        this.failed++;
+      } else {
+        this.connected--;
+      }
+
+      // 避峰抖動延遲 (500ms ~ 1500ms 後重試)，避免瞬間重連撞牆
+      const jitterMs = 500 + Math.random() * 1000;
+      setTimeout(() => {
+        this.spawnBot(id);
+      }, jitterMs);
+    };
 
     const initTimeout = setTimeout(() => {
       if (!bot.initOk) {
-        this.failed++;
-        ws.close();
+        retry();
       }
     }, INIT_TIMEOUT_MS);
 
@@ -144,16 +181,16 @@ class StressTest {
 
     ws.on("error", () => {
       if (!bot.initOk) {
-        this.failed++;
-        clearTimeout(initTimeout);
+        retry();
       }
     });
 
     ws.on("close", () => {
-      if (bot.initOk) {
-        this.connected--;
-        if (bot.moveTimer) clearInterval(bot.moveTimer);
-        if (bot.dirTimer) clearTimeout(bot.dirTimer);
+      if (!bot.initOk) {
+        retry();
+      } else {
+        // 如果是已連線成功的 bot 斷線，進行重連復原
+        retry();
       }
     });
   }
