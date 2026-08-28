@@ -19,13 +19,13 @@ const INIT_TIMEOUT_MS = 5000;
 const MOVE_INTERVAL_MS = 50;
 /** true = 常態走動；false = 集中一點 */
 const BOT_NORMAL_WALK = true;
-const CLUSTER_CENTER_X = 2000;
-const CLUSTER_CENTER_Y = 2000;
-const CLUSTER_SPREAD = 100;
+const CLUSTER_CENTER_X = 2200;
+const CLUSTER_CENTER_Y = 2200;
+const CLUSTER_SPREAD = 600;
 /** 壓測上限人數 */
-const STRESS_MAX = 800;
+const STRESS_MAX = 1000;
 /** 每批新增人數 */
-const STRESS_STEP = 30;
+const STRESS_STEP = 20;
 /** 每批新增後等待時間 (ms) */
 const STRESS_HOLD_MS = 2000;
 
