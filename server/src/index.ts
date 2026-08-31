@@ -20,11 +20,16 @@ import {
 } from "../../shared/grid.ts";
 
 const PORT = 8088;
-const TICK_RATE = 15; // 15 Hz
-const TICK_MS = 1000 / TICK_RATE; // 66.666ms
-const MOVE_THRESHOLD_SQ = 1 * 1; // 1px 移動門檻平方
-const SNAPSHOT_TICKS = 15; // 15 Ticks = 約 1 秒一次全量快照
-const MAX_AOI_CAP = 30; // 視野最多顯示人數
+const TICK_RATE = 8; // 8 Hz
+const TICK_MS = 1000 / TICK_RATE; // 125ms
+
+// 🟢 1. 設為 0，確保任何微小的移動都會即時廣播，消除「忽快忽慢」的鋸齒突跳感
+const MOVE_THRESHOLD_SQ = 0;
+
+// 🟢 2. 將全量快照調整為 24 Ticks (約 3 秒一次)，避免每秒全量校正干擾正常的 Lerp 插值
+const SNAPSHOT_TICKS = 24;
+
+const MAX_AOI_CAP = 100; // 視野最多顯示人數
 const HEARTBEAT_MS = 10_000; // 10s 探活一次；連續兩輪無 pong ≈ 20s 踢除
 
 /** 64 KB：網路積壓防衛，超過則丟本幀廣播，保護 server RAM */
@@ -266,7 +271,6 @@ const heartbeatTimer = setInterval(() => {
   for (const p of players.values()) {
     if (!p.isAlive) {
       console.warn(`[HB] Player p_${p.numId} 無 pong，踢除`);
-      // terminate() 的 close 是 async；先同步卸資源，避免 tick 仍掃到殭屍
       detachPlayer(p);
       p.ws.terminate();
       continue;
@@ -373,7 +377,9 @@ function syncViewOptimized(p: ConnectedPlayer, nearbyCount: number): void {
       prev.lastSeenTick = currentTick;
       const dx = q.x - prev.x;
       const dy = q.y - prev.y;
-      if (dx * dx + dy * dy >= MOVE_THRESHOLD_SQ) {
+
+      // 🟢 3. 取消門檻過濾：只要座標有變動就直接發送，確保 8Hz 移動軌跡平滑無卡衝
+      if (dx !== 0 || dy !== 0) {
         tempMoves.push(q);
         prev.x = q.x;
         prev.y = q.y;
@@ -415,7 +421,6 @@ let tickCount = 0;
 function updateTick() {
   currentTick++;
 
-  // 【修復點 1】：無人連線時直接 return，不執行任何 AOI 計算
   if (players.size === 0) return;
 
   const computeStart = performance.now();
@@ -439,7 +444,7 @@ function updateTick() {
     const nearbyCount = selectNearestAOI(p, tempNearby.length, MAX_AOI_CAP);
     syncViewOptimized(p, nearbyCount);
 
-    // 全量快照更新
+    // 全量快照更新（改為約 3 秒一次）
     if ((currentTick + p.snapOffset) % SNAPSHOT_TICKS === 0) {
       for (let i = 0; i < nearbyCount; i++) {
         p.lastKnown.set(tempNearby[i].numId, {
@@ -455,11 +460,11 @@ function updateTick() {
   tickComputeSum += performance.now() - computeStart;
   tickCount++;
 
-  if (currentTick % 45 === 0 && tickCount > 0) {
+  if (currentTick % 24 === 0 && tickCount > 0) {
     const avgInterval = (tickIntervalSum / tickCount).toFixed(1);
     const avgCompute = (tickComputeSum / tickCount).toFixed(1);
     console.log(
-      `[Binary-Opt 15Hz] avgInterval=${avgInterval}ms compute=${avgCompute}ms players=${players.size} bufferWarnings=${bufferedWarningCount}`
+      `[Binary-Opt 8Hz] avgInterval=${avgInterval}ms compute=${avgCompute}ms players=${players.size} bufferWarnings=${bufferedWarningCount}`
     );
     tickIntervalSum = 0;
     tickComputeSum = 0;
@@ -481,7 +486,6 @@ function gameLoop() {
     accumulator -= TICK_MS;
   }
 
-  // 【修復點 2】：計算距離下一次 Tick 的剩餘時間，使用 setTimeout 讓 CPU 在空檔休眠
   const nextDelay = Math.max(0, TICK_MS - accumulator);
   setTimeout(gameLoop, nextDelay);
 }
@@ -489,5 +493,5 @@ function gameLoop() {
 gameLoop();
 
 console.log(
-  `[Binary-Opt 15Hz] PID:${process.pid} 啟動於 port ${PORT}, AOI_CAP=${MAX_AOI_CAP}`
+  `[Binary-Opt 8Hz] PID:${process.pid} 啟動於 port ${PORT}, AOI_CAP=${MAX_AOI_CAP}`
 );

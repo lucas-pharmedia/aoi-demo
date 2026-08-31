@@ -39,14 +39,14 @@ interface RemotePlayer {
   leaving: boolean;
 }
 
-/** 內插緩衝區：伺服器 15 Hz (67ms)，建議設為 130ms，抗 Jitter 與平滑度最佳 */
-const BUFFER_DELAY_MS = 130;
-/** 緩衝區最多留幾筆快照（60Hz * 2s） */
+/** 🟢 內插緩衝區：伺服器 8 Hz (125ms)，設定為 220ms 可完全抵抗網路抖動並維持極致絲滑 */
+const BUFFER_DELAY_MS = 300;
+/** 緩衝區最多留幾筆快照 */
 const MAX_BUFFER_SNAPSHOTS = 120;
 /** 遠端進出場淡入/淡出時間 */
 const REMOTE_FADE_MS = 200;
-/** 前端向伺服器發送移動位置的最小間隔 (ms) - 設為 45ms (~22Hz) 可與 15Hz 伺服器完美匹配 */
-const SEND_MOVE_INTERVAL_MS = 45;
+/** 🟢 前端向伺服器發送移動位置的最小間隔 (ms) - 設為 80ms (~12.5Hz) 與 8Hz 伺服器完美匹配 */
+const SEND_MOVE_INTERVAL_MS = 80;
 
 export class GameScene extends Phaser.Scene {
   mapManager!: MapManager;
@@ -165,7 +165,6 @@ export class GameScene extends Phaser.Scene {
   }
 
   private upsertRemote(p: BinaryPlayerState): void {
-    // 🟢 核心修正 1：如果廣播包裡的 ID 是自己，直接過濾跳過！
     if (p.id === this.selfId || this.selfId === 0) return;
 
     const snap = { t: performance.now(), x: p.x, y: p.y };
@@ -287,62 +286,63 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /** 🟢 商業級平滑插值演算法 (完全修復時間軸逆流與忽快忽慢問題) */
   private lerpRemotes(_delta: number): void {
     const renderTime = performance.now() - BUFFER_DELAY_MS;
+
     for (const rp of this.remotes.values()) {
       const buf = rp.buffer;
 
-      while (buf.length > 2 && buf[1].t < renderTime) buf.shift();
+      // 1. 丟棄比 renderTime 還要舊的過期快照（保留至少 2 筆供插值）
+      while (buf.length > 2 && buf[1].t <= renderTime) {
+        buf.shift();
+      }
 
-      const newest = buf[buf.length - 1];
-      let x: number;
-      let y: number;
+      let x = rp.sprite.x;
+      let y = rp.sprite.y;
+      const prevX = x;
+      const prevY = y;
 
       if (buf.length === 1) {
-        x = newest.x;
-        y = newest.y;
-      } else {
-        let s2i = buf.length - 1;
-        for (let i = 1; i < buf.length; i++) {
-          if (buf[i].t > renderTime) {
-            s2i = i;
-            break;
-          }
-        }
-        const s1 = buf[s2i - 1];
-        const s2 = buf[s2i];
+        x = buf[0].x;
+        y = buf[0].y;
+      } else if (buf.length >= 2) {
+        const s1 = buf[0];
+        const s2 = buf[1];
         const seg = s2.t - s1.t || 1;
 
-        if (renderTime <= s2.t) {
+        if (renderTime < s1.t) {
+          x = s1.x;
+          y = s1.y;
+        } else if (renderTime <= s2.t) {
           const t = Phaser.Math.Clamp((renderTime - s1.t) / seg, 0, 1);
           x = Phaser.Math.Linear(s1.x, s2.x, t);
           y = Phaser.Math.Linear(s1.y, s2.y, t);
-
-          const tdx = s2.x - s1.x;
-          const tdy = s2.y - s1.y;
-          const moving = Math.hypot(tdx, tdy) > 0.5;
-          if (moving) {
-            const dir = directionFromDelta(tdx, tdy);
-            rp.lastDir = dir;
-            const animKey = walkAnimKey(PLAYER_SPRITE_TEXTURE_KEY, dir);
-            rp.sprite.play(animKey, true);
-          } else if (rp.sprite.anims.isPlaying) {
-            rp.sprite.anims.stop();
-            rp.sprite.setFrame(WALK_ANIM_FRAMES[rp.lastDir].start + 1);
-          }
         } else {
           x = s2.x;
           y = s2.y;
-          if (rp.sprite.anims.isPlaying) {
-            rp.sprite.anims.stop();
-            rp.sprite.setFrame(WALK_ANIM_FRAMES[rp.lastDir].start + 1);
-          }
         }
       }
 
+      // 2. 設定新座標與繪圖層級
       rp.sprite.x = x;
       rp.sprite.y = y;
       rp.sprite.setDepth(rp.sprite.y);
+
+      // 3. 依據當前影格 (16.6ms) 的實質物理位移量控制腳步動畫
+      const frameDx = x - prevX;
+      const frameDy = y - prevY;
+      const actualMovedDist = Math.hypot(frameDx, frameDy);
+
+      if (actualMovedDist > 0.05) {
+        const dir = directionFromDelta(frameDx, frameDy);
+        rp.lastDir = dir;
+        const animKey = walkAnimKey(PLAYER_SPRITE_TEXTURE_KEY, dir);
+        rp.sprite.play(animKey, true);
+      } else if (rp.sprite.anims.isPlaying) {
+        rp.sprite.anims.stop();
+        rp.sprite.setFrame(WALK_ANIM_FRAMES[rp.lastDir].start + 1);
+      }
     }
   }
 
@@ -369,7 +369,7 @@ export class GameScene extends Phaser.Scene {
     const player = this.playerManager?.getPlayer();
     if (player && (player.keyboardMoveActive || player.isPathMoving)) {
       const now = this.time.now;
-      // 🟢 核心修正 2：發送間隔改為 45ms，避免極高頻率發送造成 upstream 佇列塞車
+      // 🟢 發送間隔改為 80ms (~12.5Hz)，完美適應 8Hz 伺服器
       if (now - this.lastSend >= SEND_MOVE_INTERVAL_MS) {
         sendMove(player.sprite.x, player.sprite.y);
         this.lastSend = now;
