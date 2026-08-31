@@ -43,8 +43,6 @@ interface RemotePlayer {
 const BUFFER_DELAY_MS = 300;
 /** 緩衝區最多留幾筆快照 */
 const MAX_BUFFER_SNAPSHOTS = 120;
-/** 遠端進出場淡入/淡出時間 */
-const REMOTE_FADE_MS = 200;
 /** 🟢 前端向伺服器發送移動位置的最小間隔 (ms) - 設為 80ms (~12.5Hz) 與 8Hz 伺服器完美匹配 */
 const SEND_MOVE_INTERVAL_MS = 80;
 
@@ -119,7 +117,6 @@ export class GameScene extends Phaser.Scene {
   /** 分頁切回前景重連前清場，等同重開網頁的 client 狀態 */
   private resetWorldForReconnect(): void {
     for (const rp of this.remotes.values()) {
-      this.tweens.killTweensOf(rp.sprite);
       rp.sprite.destroy();
     }
     this.remotes.clear();
@@ -170,11 +167,6 @@ export class GameScene extends Phaser.Scene {
     const snap = { t: performance.now(), x: p.x, y: p.y };
     const existing = this.remotes.get(p.id);
     if (existing) {
-      if (existing.leaving) {
-        existing.leaving = false;
-        this.tweens.killTweensOf(existing.sprite);
-        existing.sprite.setAlpha(1);
-      }
       existing.buffer.push(snap);
       if (existing.buffer.length > MAX_BUFFER_SNAPSHOTS)
         existing.buffer.shift();
@@ -182,11 +174,12 @@ export class GameScene extends Phaser.Scene {
     }
 
     const idleFrame = WALK_ANIM_FRAMES.down.start + 1;
+    // 🟢 取消淡入：Alpha 直接設為 1，進場立即可見
     const sprite = this.add
       .sprite(p.x, p.y, PLAYER_SPRITE_TEXTURE_KEY, idleFrame)
       .setScale(2)
       .setDepth(10)
-      .setAlpha(0);
+      .setAlpha(1);
     sprite.setOrigin(
       0.5,
       (WORLD_CHARACTER_SHEET_FRAME.frameHeight - 14) /
@@ -200,24 +193,14 @@ export class GameScene extends Phaser.Scene {
       lastDir: "down",
       leaving: false,
     });
-
-    this.tweens.add({ targets: sprite, alpha: 1, duration: REMOTE_FADE_MS });
   }
 
   private removeRemote(id: number): void {
     const rp = this.remotes.get(id);
-    if (!rp || rp.leaving) return;
-    rp.leaving = true;
+    if (!rp) return;
 
-    this.tweens.add({
-      targets: rp.sprite,
-      alpha: 0,
-      duration: REMOTE_FADE_MS,
-      onComplete: () => {
-        rp.sprite.destroy();
-        this.remotes.delete(id);
-      },
-    });
+    rp.sprite.destroy();
+    this.remotes.delete(id);
   }
 
   private handleEnter(players: BinaryPlayerState[]): void {
