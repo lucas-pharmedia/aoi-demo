@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig } from "vite";
 
 export default defineConfig({
   server: {
@@ -11,5 +11,13 @@ export default defineConfig({
   },
   preview: {
     host: true,
+  },
+  build: {
+    rollupOptions: {
+      input: {
+        main: "index.html",
+        bench: "bench.html",
+      },
+    },
   },
 });
