@@ -1,5 +1,5 @@
 /**
- * AOI 九宮格即時同步伺服器 (單執行緒 - 極速 ArrayBuffer 二進位版)
+ * AOI 九宮格即時同步伺服器 (單執行緒 - 極速 ArrayBuffer 二進位版 - 3Hz 寬鬆版)
  *
  * 優化重點：
  *   1. 使用 enum Opcode 規範二進位通訊協定
@@ -20,14 +20,11 @@ import {
 } from "../../shared/grid.ts";
 
 const PORT = 8088;
-const TICK_RATE = 8; // 8 Hz
-const TICK_MS = 1000 / TICK_RATE; // 125ms
+const TICK_RATE = 3; // 🟢 調整為 3 Hz
+const TICK_MS = 1000 / TICK_RATE; // 約 333.33ms
 
-// 🟢 1. 設為 0，確保任何微小的移動都會即時廣播，消除「忽快忽慢」的鋸齒突跳感
-const MOVE_THRESHOLD_SQ = 0;
-
-// 🟢 2. 將全量快照調整為 24 Ticks (約 3 秒一次)，避免每秒全量校正干擾正常的 Lerp 插值
-const SNAPSHOT_TICKS = 24;
+// 🟢 在 3Hz 下，將全量快照調整為 9 Ticks (9 * 333.33ms ≈ 3 秒一次)
+const SNAPSHOT_TICKS = 9;
 
 const MAX_AOI_CAP = 100; // 視野最多顯示人數
 const HEARTBEAT_MS = 10_000; // 10s 探活一次；連續兩輪無 pong ≈ 20s 踢除
@@ -378,7 +375,7 @@ function syncViewOptimized(p: ConnectedPlayer, nearbyCount: number): void {
       const dx = q.x - prev.x;
       const dy = q.y - prev.y;
 
-      // 🟢 3. 取消門檻過濾：只要座標有變動就直接發送，確保 8Hz 移動軌跡平滑無卡衝
+      // 只要座標有變動就直接發送
       if (dx !== 0 || dy !== 0) {
         tempMoves.push(q);
         prev.x = q.x;
@@ -444,7 +441,7 @@ function updateTick() {
     const nearbyCount = selectNearestAOI(p, tempNearby.length, MAX_AOI_CAP);
     syncViewOptimized(p, nearbyCount);
 
-    // 全量快照更新（改為約 3 秒一次）
+    // 全量快照更新（3Hz 下為 9 Ticks ≈ 3 秒一次）
     if ((currentTick + p.snapOffset) % SNAPSHOT_TICKS === 0) {
       for (let i = 0; i < nearbyCount; i++) {
         p.lastKnown.set(tempNearby[i].numId, {
@@ -460,11 +457,12 @@ function updateTick() {
   tickComputeSum += performance.now() - computeStart;
   tickCount++;
 
-  if (currentTick % 24 === 0 && tickCount > 0) {
+  // 每 9 Ticks 輸出一次效能統計（約 3 秒一次）
+  if (currentTick % 9 === 0 && tickCount > 0) {
     const avgInterval = (tickIntervalSum / tickCount).toFixed(1);
     const avgCompute = (tickComputeSum / tickCount).toFixed(1);
     console.log(
-      `[Binary-Opt 8Hz] avgInterval=${avgInterval}ms compute=${avgCompute}ms players=${players.size} bufferWarnings=${bufferedWarningCount}`
+      `[Binary-Opt 3Hz] avgInterval=${avgInterval}ms compute=${avgCompute}ms players=${players.size} bufferWarnings=${bufferedWarningCount}`
     );
     tickIntervalSum = 0;
     tickComputeSum = 0;
@@ -493,5 +491,5 @@ function gameLoop() {
 gameLoop();
 
 console.log(
-  `[Binary-Opt 8Hz] PID:${process.pid} 啟動於 port ${PORT}, AOI_CAP=${MAX_AOI_CAP}`
+  `[Binary-Opt 3Hz] PID:${process.pid} 啟動於 port ${PORT}, AOI_CAP=${MAX_AOI_CAP}`
 );

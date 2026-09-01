@@ -12,11 +12,11 @@ import WebSocket from "ws";
 import { MAP_WIDTH, MAP_HEIGHT } from "../../shared/grid.ts";
 
 /** 判斷「卡」：平均封包間隔超過此值 (ms)。正常 66.7ms (15Hz) 左右。 */
-const LAG_THRESHOLD_MS = 150;
+const LAG_THRESHOLD_MS = 800;
 /** 連線後等 init 的逾時 (ms)，超過算失敗並重連 */
 const INIT_TIMEOUT_MS = 5000;
 /** 每個 bot 送 move 的節流 (ms)，跟真實 client 一致 (20/s) */
-const MOVE_INTERVAL_MS = 50;
+const MOVE_INTERVAL_MS = 333;
 /** true = 常態走動；false = 集中一點 */
 const BOT_NORMAL_WALK = false;
 const CLUSTER_CENTER_X = 2200;

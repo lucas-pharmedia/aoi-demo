@@ -41,12 +41,12 @@ interface RemotePlayer {
   isMoving: boolean;
 }
 
-/**  內插緩衝區：伺服器 8 Hz (125ms)，設定為 220ms 可完全抵抗網路抖動並維護極致流暢 */
-const BUFFER_DELAY_MS = 220;
+/** 🟢 專為 3 Hz (333ms) 伺服器設計：設定為 550ms 延遲，保證水庫常駐 2 筆快照做純線性插值 */
+const BUFFER_DELAY_MS = 550;
 /** 緩衝區最多留幾筆快照 */
 const MAX_BUFFER_SNAPSHOTS = 120;
-/**  前端向伺服器發送移動位置的最小間隔 (ms) - 80ms (~12.5Hz) */
-const SEND_MOVE_INTERVAL_MS = 80;
+/** 🟢 3 Hz 伺服器下，前端 sendMove 設為 100ms ~ 150ms 即可 */
+const SEND_MOVE_INTERVAL_MS = 120;
 
 export class GameScene extends Phaser.Scene {
   mapManager!: MapManager;
@@ -303,7 +303,7 @@ export class GameScene extends Phaser.Scene {
     for (const rp of this.remotes.values()) {
       const buf = rp.buffer;
 
-      // 1. 拋棄過期快照
+      // 1. 拋棄過期快照 (保留至少 2 筆)
       while (buf.length > 2 && buf[1].t <= renderTime) {
         buf.shift();
       }
@@ -314,46 +314,49 @@ export class GameScene extends Phaser.Scene {
       let nextX = prevX;
       let nextY = prevY;
 
-      // 2. 依據時間軸計算目標座標
+      // 2. 依據時間軸計算目標座標 (100% 忠實於伺服器座標)
       if (buf.length === 1) {
+        // 水庫乾涸（網路波動 > 550ms）：精準停在伺服器給的最後座標，絕不虛構位移
         nextX = buf[0].x;
         nextY = buf[0].y;
-        rp.isMoving = false; //  只剩一筆快照代表角色已停下
+        rp.isMoving = false;
       } else if (buf.length >= 2) {
         const s1 = buf[0];
         const s2 = buf[1];
         const seg = s2.t - s1.t || 1;
 
         if (renderTime < s1.t) {
-          //  核心修復 2：未達到插值時間時，保持當前畫面座標，絕對不往舊方向點修正
+          // 時間未到，保持當前畫面座標，避免向舊點吸過去
           nextX = prevX;
           nextY = prevY;
         } else if (renderTime <= s2.t) {
+          // 正常 3 Hz 下的標準 100% 精準線性插值
           const t = Phaser.Math.Clamp((renderTime - s1.t) / seg, 0, 1);
           nextX = Phaser.Math.Linear(s1.x, s2.x, t);
           nextY = Phaser.Math.Linear(s1.y, s2.y, t);
         } else {
-          // 網路微小抖動末端：指數逼近最新點
-          nextX = Phaser.Math.Linear(prevX, s2.x, 0.3);
-          nextY = Phaser.Math.Linear(prevY, s2.y, 0.3);
+          // 🟢 網路微幅卡頓 (renderTime > s2.t)：
+          // 採用指數衰減（Factor 0.15）平滑趨近最後點，讓角色自然減速停下，而不是硬卡/暴衝
+          nextX = Phaser.Math.Linear(prevX, s2.x, 0.15);
+          nextY = Phaser.Math.Linear(prevY, s2.y, 0.15);
         }
       }
 
-      // 3. 超遠距離防暴衝硬貼合
+      // 3. 超遠距離防暴衝硬貼合 (切換分頁重連等)
       const distToNext = Math.hypot(nextX - prevX, nextY - prevY);
-      if (distToNext > 120) {
+      if (distToNext > 150) {
         const latest = buf[buf.length - 1];
         rp.buffer = [latest];
         nextX = latest.x;
         nextY = latest.y;
       }
 
-      // 4. 更新座標與繪圖深度
+      // 4. 更新 Sprite 實體座標與繪圖深度
       rp.sprite.x = nextX;
       rp.sprite.y = nextY;
       rp.sprite.setDepth(rp.sprite.y);
 
-      // 5. 依據單影格 (16.6ms) 實質位移距離控制腳步動畫
+      // 5. 依據實質影格位移量播放動畫
       const frameDx = nextX - prevX;
       const frameDy = nextY - prevY;
       const actualMovedDist = Math.hypot(frameDx, frameDy);
