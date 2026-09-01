@@ -1,10 +1,11 @@
 /**
- * 極速二進位 Network 模組 (Zero-Alloc & Ping-Pong 心跳保活版)
+ * 極速二進位 Network 模組 (Zero-Alloc Safe & Ping-Pong 心跳保活版)
  *
- * 重點功能：
- *   1. 【Ping-Pong 心跳保活】：每 1 秒自動發送 1-Byte 心跳包（Opcode.Ping），
- *      維持上行流量，徹底解決 iOS Safari 在靜止時因省電機制導致的 WebSocket 下行緩衝區塞車 (Socket Stall)。
- *   2. 【Zero-Alloc 解碼】：採用 Object Pool 物件池與全域陣列重用，解碼過程 0 垃圾產生，消除 GC Pause。
+ * 重點修復與優化：
+ *   1. 【修正 Reference 污染】：解碼 OP_MOVE/ENTER/UPDATE 時，吐出獨立純數值物件，
+ *      徹底解決 iOS Safari / Phaser 水庫 Buffer 存到相同引用導致座標被蓋掉、計算爆出 NaN 卡死的問題。
+ *   2. 【Ping-Pong 心跳保活】：每 2 秒自動發送 1-Byte 心跳包（Opcode.Ping），
+ *      維持上行流量，解決 iOS Safari 在靜止時因省電機制導致的 WebSocket 下行 Socket Stall。
  *   3. 【雙向效能診斷】：持續監測 CPU / 主執行緒卡死 (Main Thread Blocked) 與網路封包斷層 (Packet Gap)。
  */
 
@@ -17,7 +18,7 @@ export enum Opcode {
   Enter = 3,
   Leave = 4,
   Update = 5,
-  Ping = 6, // 🟢 新增 Ping 心跳 (1 Byte)
+  Ping = 6, // 1 Byte 心跳包
 }
 
 export interface BinaryPlayerState {
@@ -43,7 +44,7 @@ let paused = false;
 let lastPacketAt: number | null = null;
 
 // ----------------------------------------------------------------------
-// 🟢 1. 主執行緒 (CPU / GC) 心跳診斷監測器
+// 1. 主執行緒 (CPU / GC) 心跳診斷監測器
 // ----------------------------------------------------------------------
 let lastFrameTime =
   typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -53,7 +54,7 @@ if (typeof window !== "undefined") {
     const now = performance.now();
     const frameDelta = now - lastFrameTime;
 
-    // 單個影格超過 500ms，代表主執行緒被硬性凍結 (100% 為 GC 或 CPU 卡死)
+    // 單個影格超過 500ms，代表主執行緒被硬性凍結 (GC 或 CPU 滿載)
     if (frameDelta > 500) {
       console.error(
         `[DIAGNOSTIC] 🚨 Main Thread (CPU/GC) Blocked for ${frameDelta.toFixed(
@@ -69,22 +70,13 @@ if (typeof window !== "undefined") {
 }
 
 // ----------------------------------------------------------------------
-// 🟢 2. Zero-Alloc 防 GC 物件池 (Object Pool & Array Reuse)
+// 2. 解包重用陣列 (Array Reuse)
 // ----------------------------------------------------------------------
-const MAX_POOL_SIZE = 1000;
-const playerPool: BinaryPlayerState[] = Array.from(
-  { length: MAX_POOL_SIZE },
-  () => ({
-    id: 0,
-    x: 0,
-    y: 0,
-  })
-);
 const reusablePlayersArray: BinaryPlayerState[] = [];
 const reusableIdsArray: number[] = [];
 
 // ----------------------------------------------------------------------
-// 🟢 3. Zero-Alloc 發送專用 Buffer (Move & Ping)
+// 3. 發送專用 Buffer (Move & Ping)
 // ----------------------------------------------------------------------
 // Move 封包 (9 Bytes): [1B Opcode][4B Float32 X][4B Float32 Y]
 const sendMoveBuffer = new ArrayBuffer(9);
@@ -102,11 +94,10 @@ function clearRetryTimer(): void {
 }
 
 // ----------------------------------------------------------------------
-// 🟢 4. Ping-Pong 心跳計時器管理 (專治 iOS Safari 靜止斷流)
+// 4. Ping-Pong 心跳計時器管理 (防 iOS Safari 靜止斷流)
 // ----------------------------------------------------------------------
 function startHeartbeat(): void {
   stopHeartbeat();
-  // 每 1000ms 發送 1-Byte Ping 保持雙向 TCP 活性，防止 iOS 網卡進入省電緩衝佇列
   heartbeatTimer = window.setInterval(() => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(pingBuffer);
@@ -145,7 +136,7 @@ export function connect(url: string, h: Handlers): void {
 
   ws.onopen = () => {
     console.log(`[network] connected (Binary Mode + Ping Heartbeat): ${url}`);
-    startHeartbeat(); // 🟢 連線成功，立即啟動 Ping 心跳
+    startHeartbeat();
   };
 
   ws.onmessage = (ev: MessageEvent) => {
@@ -164,7 +155,7 @@ export function connect(url: string, h: Handlers): void {
     lastPacketAt = now;
 
     // ------------------------------------------------------------------
-    // 二進位封包解碼 (Zero-Alloc Binary Unpacking)
+    // 二進位封包解碼 (Safe Binary Unpacking)
     // ------------------------------------------------------------------
     const view = new DataView(ev.data);
     const opcode = view.getUint8(0) as Opcode;
@@ -184,7 +175,7 @@ export function connect(url: string, h: Handlers): void {
       case Opcode.Enter:
       case Opcode.Update: {
         const count = view.getUint16(1, true);
-        reusablePlayersArray.length = 0; // 重置長度，零垃圾產生
+        reusablePlayersArray.length = 0; // 重置陣列，不產生垃圾 GC
         let offset = 3;
 
         for (let i = 0; i < count; i++) {
@@ -192,17 +183,8 @@ export function connect(url: string, h: Handlers): void {
           const x = view.getFloat32(offset + 2, true);
           const y = view.getFloat32(offset + 6, true);
 
-          let item = playerPool[i];
-          if (!item) {
-            item = { id, x, y };
-            playerPool[i] = item;
-          } else {
-            item.id = id;
-            item.x = x;
-            item.y = y;
-          }
-
-          reusablePlayersArray.push(item);
+          // 🟢 關鍵修復：每次 push 獨立數值物件，絕不共用物件引用，避免水庫 Buffer 被未來封包覆蓋
+          reusablePlayersArray.push({ id, x, y });
           offset += 10;
         }
 
@@ -232,7 +214,7 @@ export function connect(url: string, h: Handlers): void {
 
   ws.onclose = () => {
     ws = null;
-    stopHeartbeat(); // 🟢 斷線時停止心跳
+    stopHeartbeat();
     if (paused || !handlers || !wsUrl) return;
     console.warn("[network] disconnected, retrying in 1s");
     retryTimer = window.setTimeout(() => {

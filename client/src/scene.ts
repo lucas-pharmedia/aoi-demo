@@ -1,3 +1,4 @@
+// scene.ts
 import Phaser from "phaser";
 import {
   connect,
@@ -37,7 +38,7 @@ interface RemotePlayer {
   buffer: { t: number; x: number; y: number }[];
   lastDir: Direction;
   leaving: boolean;
-  /**  標記該角色是否處於靜止狀態 */
+  /** 標記該角色是否處於靜止狀態 */
   isMoving: boolean;
 }
 
@@ -45,7 +46,7 @@ interface RemotePlayer {
 const BUFFER_DELAY_MS = 550;
 /** 緩衝區最多留幾筆快照 */
 const MAX_BUFFER_SNAPSHOTS = 120;
-/** 🟢 3 Hz 伺服器下，前端 sendMove 設為 100ms ~ 150ms 即可 */
+/** 🟢 3 Hz 伺服器下，前端 sendMove 設為 120ms 即可 */
 const SEND_MOVE_INTERVAL_MS = 120;
 
 export class GameScene extends Phaser.Scene {
@@ -169,16 +170,17 @@ export class GameScene extends Phaser.Scene {
     const now = performance.now();
     const existing = this.remotes.get(p.id);
 
+    // 🟢 純數值備份，徹底斷開 network.ts 的物件引用
+    const px = Number(p.x);
+    const py = Number(p.y);
+
     if (existing) {
       const lastSnap = existing.buffer[existing.buffer.length - 1];
 
       if (lastSnap) {
         const timeDiff = now - lastSnap.t;
 
-        //  核心修復 1：靜止後重新起步邏輯 (Stationary Resumption)
-        // 只要收包間隔 > 130ms (超過一個 8Hz Tick)，代表對方剛才停了下來！
-        // 當他重新起步時，直接以「當前畫面的 Sprite 座標」作為插值起點，
-        // 絕對不拿舊的伺服器座標做插值，徹底杜絕反方向抖動！
+        // 靜止後重新起步邏輯 (Stationary Resumption)
         if (timeDiff > 130 || !existing.isMoving) {
           existing.isMoving = true;
           existing.buffer = [
@@ -187,13 +189,13 @@ export class GameScene extends Phaser.Scene {
               x: existing.sprite.x,
               y: existing.sprite.y,
             },
-            { t: now, x: p.x, y: p.y },
+            { t: now, x: px, y: py },
           ];
           return;
         }
       }
 
-      existing.buffer.push({ t: now, x: p.x, y: p.y });
+      existing.buffer.push({ t: now, x: px, y: py });
       if (existing.buffer.length > MAX_BUFFER_SNAPSHOTS) {
         existing.buffer.shift();
       }
@@ -202,7 +204,7 @@ export class GameScene extends Phaser.Scene {
 
     const idleFrame = WALK_ANIM_FRAMES.down.start + 1;
     const sprite = this.add
-      .sprite(p.x, p.y, PLAYER_SPRITE_TEXTURE_KEY, idleFrame)
+      .sprite(px, py, PLAYER_SPRITE_TEXTURE_KEY, idleFrame)
       .setScale(2)
       .setDepth(10)
       .setAlpha(1);
@@ -215,7 +217,7 @@ export class GameScene extends Phaser.Scene {
 
     this.remotes.set(p.id, {
       sprite,
-      buffer: [{ t: now, x: p.x, y: p.y }],
+      buffer: [{ t: now, x: px, y: py }],
       lastDir: "down",
       leaving: false,
       isMoving: false,
@@ -296,7 +298,7 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /**  商業級平滑插值演算法 */
+  /** 商業級平滑插值演算法 */
   private lerpRemotes(_delta: number): void {
     const renderTime = performance.now() - BUFFER_DELAY_MS;
 
@@ -323,7 +325,9 @@ export class GameScene extends Phaser.Scene {
       } else if (buf.length >= 2) {
         const s1 = buf[0];
         const s2 = buf[1];
-        const seg = s2.t - s1.t || 1;
+
+        // 🟢 核心安全修復：防止 s2.t - s1.t 等於 0 導致除以零 (NaN)，徹底消除 iPhone 卡死問題
+        const seg = Math.max(1, s2.t - s1.t);
 
         if (renderTime < s1.t) {
           // 時間未到，保持當前畫面座標，避免向舊點吸過去
@@ -335,7 +339,7 @@ export class GameScene extends Phaser.Scene {
           nextX = Phaser.Math.Linear(s1.x, s2.x, t);
           nextY = Phaser.Math.Linear(s1.y, s2.y, t);
         } else {
-          // 🟢 網路微幅卡頓 (renderTime > s2.t)：
+          // 網路微幅卡頓 (renderTime > s2.t)：
           // 採用指數衰減（Factor 0.15）平滑趨近最後點，讓角色自然減速停下，而不是硬卡/暴衝
           nextX = Phaser.Math.Linear(prevX, s2.x, 0.15);
           nextY = Phaser.Math.Linear(prevY, s2.y, 0.15);

@@ -8,6 +8,7 @@
  *   4. 數字化 Player ID (Uint16)：省去字串比對與記憶體負擔
  *   5. 休眠型自適應遊戲主迴圈 (解決 setImmediate 導致 CPU 100% 空轉與 Timer 漂移)
  *   6. QuickSelect (中點 Pivot，無 Math.random() 開銷)
+ *   7. 雙向訊息探活：只要 Client 有傳送 Message (如 Move)，即自動維持 isAlive 狀態，徹底解決低頻率 (3Hz) 下壓測 Bot 被誤踢問題
  */
 import { WebSocketServer, WebSocket } from "ws";
 import {
@@ -27,7 +28,7 @@ const TICK_MS = 1000 / TICK_RATE; // 約 333.33ms
 const SNAPSHOT_TICKS = 9;
 
 const MAX_AOI_CAP = 100; // 視野最多顯示人數
-const HEARTBEAT_MS = 10_000; // 10s 探活一次；連續兩輪無 pong ≈ 20s 踢除
+const HEARTBEAT_MS = 10_000; // 10s 探活一次；連續兩輪無 activity ≈ 20s 踢除
 
 /** 64 KB：網路積壓防衛，超過則丟本幀廣播，保護 server RAM */
 const BACKPRESSURE_DROP_BYTES = 64 * 1024;
@@ -65,7 +66,7 @@ interface ConnectedPlayer {
   gridId: number;
   lastKnown: Map<number, TrackedPlayerInfo>;
   snapOffset: number;
-  /** WebSocket ping/pong 探活；heartbeat 輪到時先清 false，收到 pong 再設回 true */
+  /** WebSocket 探活；收到 pong 或收包時重置為 true */
   isAlive: boolean;
 }
 
@@ -231,6 +232,9 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("message", (raw: ArrayBuffer) => {
+    // 🟢 關鍵修復：只要收到 Client 傳來的任何 Message (如 Move)，就代表它活著！
+    player.isAlive = true;
+
     // 接收 Client 移動二進位封包 [1B Opcode (2)][4B X][4B Y] (共 9 Bytes)
     if (raw.byteLength < 9) return;
 
@@ -261,13 +265,13 @@ wss.on("connection", (ws) => {
 });
 
 // ----------------------------------------------------------------------
-// WebSocket 心跳探活 (ping / pong → ConnectedPlayer.isAlive)
+// WebSocket 心跳探活 (ping / pong / message → ConnectedPlayer.isAlive)
 // ----------------------------------------------------------------------
 
 const heartbeatTimer = setInterval(() => {
   for (const p of players.values()) {
     if (!p.isAlive) {
-      console.warn(`[HB] Player p_${p.numId} 無 pong，踢除`);
+      console.warn(`[HB] Player p_${p.numId} 無活動/無 pong，踢除`);
       detachPlayer(p);
       p.ws.terminate();
       continue;
