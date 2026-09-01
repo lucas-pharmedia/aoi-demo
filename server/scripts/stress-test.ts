@@ -6,10 +6,21 @@
  *
  * 用法：
  *   npm run stress
- *   調整 STRESS_URL / STRESS_MAX / STRESS_STEP / STRESS_HOLD_MS 常數即可
+ *   調整 scripts/.env 的 STRESS_URL，其餘常數在檔案內修改
  */
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { MAP_WIDTH, MAP_HEIGHT } from "../../shared/grid.ts";
+
+const envPath = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  ".env"
+);
+if (existsSync(envPath)) {
+  process.loadEnvFile(envPath);
+}
 
 /** 判斷「卡」：平均封包間隔超過此值 (ms)。正常 66.7ms (15Hz) 左右。 */
 const LAG_THRESHOLD_MS = 150;
@@ -28,8 +39,12 @@ const STRESS_MAX = 800;
 const STRESS_STEP = 20;
 /** 每批新增後等待時間 (ms) */
 const STRESS_HOLD_MS = 2000;
-/** 壓測目標 WebSocket URL */
-const STRESS_URL = "ws://43.212.240.174:8088";
+/** 壓測目標 WebSocket URL（scripts/.env 的 STRESS_URL） */
+const STRESS_URL = process.env.STRESS_URL;
+if (!STRESS_URL) {
+  console.error("Missing STRESS_URL. Set it in server/scripts/.env");
+  process.exit(1);
+}
 
 // ----------------------------------------------------------------------
 // Bot 全域發送專用 Buffer (9 Bytes) - 避免 Bot 端的 GC 影響測量精準度
