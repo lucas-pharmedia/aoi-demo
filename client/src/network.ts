@@ -1,23 +1,14 @@
 /**
- * 極速二進位 Network 模組
- *
- * 優化重點：
- *   1. 使用 enum Opcode 規範二進位通訊協定
- *   2. 全 ArrayBuffer / DataView 解包：支援 16-bit 數字型 ID 與 Float32 坐標
- *   3. 保留 Packet Gap (掉幀/延遲) 5 秒統計監測
- *   4. 保留斷線自動重連 (Auto Reconnect) 機制
- *   5. Zero-Alloc sendMove：預留 9 Bytes Buffer，傳送位置 0 垃圾產生
+ * 極速二進位 Network 模組 (Zero-Alloc & iOS 保活優化版)
  */
 
-// ----------------------------------------------------------------------
-// 二進位 Opcode 定義 (Enum 封裝，可與後端共享)
-// ----------------------------------------------------------------------
 export enum Opcode {
   Init = 1,
   Move = 2,
   Enter = 3,
   Leave = 4,
   Update = 5,
+  Ping = 6, // 🟢 新增 Ping 心跳 (1 Byte)
 }
 
 export interface BinaryPlayerState {
@@ -38,17 +29,26 @@ let ws: WebSocket | null = null;
 let wsUrl: string | null = null;
 let handlers: Handlers | null = null;
 let retryTimer: number | null = null;
+let heartbeatTimer: number | null = null;
 let paused = false;
 let lastPacketAt: number | null = null;
 let gapWindowStart = 0;
 let gapBuckets = { g60: 0, g100: 0, g200: 0 };
 
 // ----------------------------------------------------------------------
-// Zero-Alloc 發送專用 Buffer (9 Bytes)
+// 🟢 1. Zero-Alloc 全域重用解包陣列與物件池
+// ----------------------------------------------------------------------
+const reusablePlayersArray: BinaryPlayerState[] = [];
+const reusableIdsArray: number[] = [];
+
+// ----------------------------------------------------------------------
+// 🟢 2. Zero-Alloc 發送專用 Buffer (Move & Ping)
 // ----------------------------------------------------------------------
 const sendMoveBuffer = new ArrayBuffer(9);
 const sendMoveView = new DataView(sendMoveBuffer);
-sendMoveView.setUint8(0, Opcode.Move); // 自動綁定 Opcode.Move (2)
+sendMoveView.setUint8(0, Opcode.Move);
+
+const pingBuffer = new Uint8Array([Opcode.Ping]).buffer;
 
 function clearRetryTimer(): void {
   if (retryTimer !== null) {
@@ -57,9 +57,27 @@ function clearRetryTimer(): void {
   }
 }
 
+function startHeartbeat(): void {
+  stopHeartbeat();
+  // 🟢 每 2 秒發送 1-Byte 心跳，防止 iOS Safari 網卡休眠斷流
+  heartbeatTimer = window.setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(pingBuffer);
+    }
+  }, 2000);
+}
+
+function stopHeartbeat(): void {
+  if (heartbeatTimer !== null) {
+    window.clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
 export function disconnect(): void {
   paused = true;
   clearRetryTimer();
+  stopHeartbeat();
   ws?.close();
   ws = null;
 }
@@ -76,14 +94,18 @@ export function connect(url: string, h: Handlers): void {
   }
 
   ws = new WebSocket(url);
-  ws.binaryType = "arraybuffer"; // 必須設定為 arraybuffer 以解二進位包
+  ws.binaryType = "arraybuffer";
 
   ws.onopen = () => {
     console.log(`[network] connected (Binary Mode): ${url}`);
+    startHeartbeat();
   };
 
   ws.onmessage = (ev: MessageEvent) => {
     if (!handlers || !(ev.data instanceof ArrayBuffer)) return;
+
+    // 🟢 防禦性檢查：避免 DataView 讀取空封包越界
+    if (ev.data.byteLength < 1) return;
 
     // ------------------------------------------------------------------
     // Packet Gap 延遲與掉幀統計邏輯
@@ -119,6 +141,7 @@ export function connect(url: string, h: Handlers): void {
     switch (opcode) {
       // 1. OP_INIT [1B Opcode][2B SelfId][4B X][4B Y]
       case Opcode.Init: {
+        if (ev.data.byteLength < 11) return;
         const selfId = view.getUint16(1, true);
         const x = view.getFloat32(3, true);
         const y = view.getFloat32(7, true);
@@ -127,41 +150,47 @@ export function connect(url: string, h: Handlers): void {
       }
 
       // 2. OP_MOVE, OP_ENTER, OP_UPDATE
-      // 結構: [1B Opcode][2B Count] + Count * [2B Id][4B X][4B Y]
       case Opcode.Move:
       case Opcode.Enter:
       case Opcode.Update: {
+        if (ev.data.byteLength < 3) return;
         const count = view.getUint16(1, true);
-        const players: BinaryPlayerState[] = [];
+
+        // 🟢 重用陣列，避免每幀產生物件垃圾 (Zero-Alloc Unpacking)
+        reusablePlayersArray.length = 0;
         let offset = 3;
 
         for (let i = 0; i < count; i++) {
+          if (offset + 10 > ev.data.byteLength) break;
           const id = view.getUint16(offset, true);
           const x = view.getFloat32(offset + 2, true);
           const y = view.getFloat32(offset + 6, true);
-          players.push({ id, x, y });
+
+          reusablePlayersArray.push({ id, x, y });
           offset += 10;
         }
 
-        if (opcode === Opcode.Enter) handlers.onEnter(players);
-        else if (opcode === Opcode.Move) handlers.onMove(players);
-        else if (opcode === Opcode.Update) handlers.onUpdate(players);
+        if (opcode === Opcode.Enter) handlers.onEnter(reusablePlayersArray);
+        else if (opcode === Opcode.Move) handlers.onMove(reusablePlayersArray);
+        else if (opcode === Opcode.Update)
+          handlers.onUpdate(reusablePlayersArray);
         break;
       }
 
       // 3. OP_LEAVE
-      // 結構: [1B Opcode][2B Count] + Count * [2B Id]
       case Opcode.Leave: {
+        if (ev.data.byteLength < 3) return;
         const count = view.getUint16(1, true);
-        const ids: number[] = [];
+        reusableIdsArray.length = 0;
         let offset = 3;
 
         for (let i = 0; i < count; i++) {
-          ids.push(view.getUint16(offset, true));
+          if (offset + 2 > ev.data.byteLength) break;
+          reusableIdsArray.push(view.getUint16(offset, true));
           offset += 2;
         }
 
-        handlers.onLeave(ids);
+        handlers.onLeave(reusableIdsArray);
         break;
       }
     }
@@ -169,17 +198,22 @@ export function connect(url: string, h: Handlers): void {
 
   ws.onclose = () => {
     ws = null;
+    stopHeartbeat();
     if (paused || !handlers || !wsUrl) return;
-    console.warn("[network] disconnected, retrying in 1s");
+
+    // 🟢 避峰重連：1s ~ 2.5s 隨機退避，避免伺服器遭重連海嘯打癱
+    const jitter = 1000 + Math.random() * 1500;
+    console.warn(
+      `[network] disconnected, retrying in ${(jitter / 1000).toFixed(1)}s`
+    );
     retryTimer = window.setTimeout(() => {
       if (handlers && wsUrl) connect(wsUrl, handlers);
-    }, 1000);
+    }, jitter);
   };
 
   ws.onerror = () => ws?.close();
 }
 
-/** 分頁切回前景時重連（須先 reset scene 狀態） */
 export function reconnect(): void {
   if (!handlers || !wsUrl) return;
   paused = false;
@@ -187,7 +221,6 @@ export function reconnect(): void {
   connect(wsUrl, handlers);
 }
 
-/** 分頁 hidden 斷線、visible 重連；回傳 cleanup 供 scene shutdown 用 */
 export function setupVisibilityReconnect(onVisible?: () => void): () => void {
   const onVisibilityChange = (): void => {
     if (document.visibilityState === "hidden") {
@@ -210,7 +243,6 @@ export function setupVisibilityReconnect(onVisible?: () => void): () => void {
   };
 }
 
-/** 極速 Zero-Alloc 發送移動封包 (Float32 點) */
 export function sendMove(x: number, y: number): void {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   sendMoveView.setFloat32(1, x, true);
