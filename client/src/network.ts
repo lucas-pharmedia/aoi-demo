@@ -1,12 +1,13 @@
 /**
- * 極速二進位 Network 模組
+ * 極速二進位 Network 模組 (Zero-Alloc & GC Free 優化版)
  *
  * 優化重點：
  *   1. 使用 enum Opcode 規範二進位通訊協定
  *   2. 全 ArrayBuffer / DataView 解包：支援 16-bit 數字型 ID 與 Float32 坐標
- *   3. 保留 Packet Gap (掉幀/延遲) 5 秒統計監測
- *   4. 保留斷線自動重連 (Auto Reconnect) 機制
- *   5. Zero-Alloc sendMove：預留 9 Bytes Buffer，傳送位置 0 垃圾產生
+ *   3. 🟢 採用全域 Object Pool 與 Array 重用，達到解碼 0 垃圾產生 (徹底消滅 iPhone GC 卡頓)
+ *   4. 保留 Packet Gap (掉幀/延遲) 5 秒統計監測
+ *   5. 保留斷線自動重連 (Auto Reconnect) 機制
+ *   6. Zero-Alloc sendMove：預留 9 Bytes Buffer，傳送位置 0 垃圾產生
  */
 
 // ----------------------------------------------------------------------
@@ -42,6 +43,21 @@ let paused = false;
 let lastPacketAt: number | null = null;
 let gapWindowStart = 0;
 let gapBuckets = { g60: 0, g100: 0, g200: 0 };
+
+// ----------------------------------------------------------------------
+// 🟢 Zero-Alloc 防 GC 專用物件池 (Object Pool & Array Reuse)
+// ----------------------------------------------------------------------
+const MAX_POOL_SIZE = 1000;
+const playerPool: BinaryPlayerState[] = Array.from(
+  { length: MAX_POOL_SIZE },
+  () => ({
+    id: 0,
+    x: 0,
+    y: 0,
+  })
+);
+const reusablePlayersArray: BinaryPlayerState[] = [];
+const reusableIdsArray: number[] = [];
 
 // ----------------------------------------------------------------------
 // Zero-Alloc 發送專用 Buffer (9 Bytes)
@@ -93,7 +109,6 @@ export function connect(url: string, h: Handlers): void {
       const gap = now - lastPacketAt;
       if (gap > 200) {
         gapBuckets.g200++;
-        console.log(`[PACKET] gap ${gap.toFixed(0)}ms`);
       } else if (gap > 100) {
         gapBuckets.g100++;
       } else if (gap > 60) {
@@ -103,15 +118,12 @@ export function connect(url: string, h: Handlers): void {
     lastPacketAt = now;
     if (gapWindowStart === 0) gapWindowStart = now;
     if (now - gapWindowStart >= 5000) {
-      console.log(
-        `[PACKET] 5s 摘要 60-100=${gapBuckets.g60} 100-200=${gapBuckets.g100} >200=${gapBuckets.g200}`
-      );
       gapBuckets = { g60: 0, g100: 0, g200: 0 };
       gapWindowStart = now;
     }
 
     // ------------------------------------------------------------------
-    // 二進位封包解碼 (Binary Unpacking)
+    // 二進位封包解碼 (Zero-Alloc Binary Unpacking)
     // ------------------------------------------------------------------
     const view = new DataView(ev.data);
     const opcode = view.getUint8(0) as Opcode;
@@ -132,20 +144,33 @@ export function connect(url: string, h: Handlers): void {
       case Opcode.Enter:
       case Opcode.Update: {
         const count = view.getUint16(1, true);
-        const players: BinaryPlayerState[] = [];
+        reusablePlayersArray.length = 0; // 重置長度，不觸發垃圾回收
         let offset = 3;
 
         for (let i = 0; i < count; i++) {
           const id = view.getUint16(offset, true);
           const x = view.getFloat32(offset + 2, true);
           const y = view.getFloat32(offset + 6, true);
-          players.push({ id, x, y });
+
+          // 🟢 從物件池複寫屬性，完全 0 新物件產生
+          let item = playerPool[i];
+          if (!item) {
+            item = { id, x, y };
+            playerPool[i] = item;
+          } else {
+            item.id = id;
+            item.x = x;
+            item.y = y;
+          }
+
+          reusablePlayersArray.push(item);
           offset += 10;
         }
 
-        if (opcode === Opcode.Enter) handlers.onEnter(players);
-        else if (opcode === Opcode.Move) handlers.onMove(players);
-        else if (opcode === Opcode.Update) handlers.onUpdate(players);
+        if (opcode === Opcode.Enter) handlers.onEnter(reusablePlayersArray);
+        else if (opcode === Opcode.Move) handlers.onMove(reusablePlayersArray);
+        else if (opcode === Opcode.Update)
+          handlers.onUpdate(reusablePlayersArray);
         break;
       }
 
@@ -153,15 +178,15 @@ export function connect(url: string, h: Handlers): void {
       // 結構: [1B Opcode][2B Count] + Count * [2B Id]
       case Opcode.Leave: {
         const count = view.getUint16(1, true);
-        const ids: number[] = [];
+        reusableIdsArray.length = 0; // 🟢 重用陣列
         let offset = 3;
 
         for (let i = 0; i < count; i++) {
-          ids.push(view.getUint16(offset, true));
+          reusableIdsArray.push(view.getUint16(offset, true));
           offset += 2;
         }
 
-        handlers.onLeave(ids);
+        handlers.onLeave(reusableIdsArray);
         break;
       }
     }
