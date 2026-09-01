@@ -14,22 +14,22 @@ import { MAP_WIDTH, MAP_HEIGHT } from "../../shared/grid.ts";
 /** 判斷「卡」：平均封包間隔超過此值 (ms)。正常 66.7ms (15Hz) 左右。 */
 const LAG_THRESHOLD_MS = 800;
 /** 連線後等 init 的逾時 (ms)，超過算失敗並重連 */
-const INIT_TIMEOUT_MS = 5000;
+const INIT_TIMEOUT_MS = 10_000;
 /** 每個 bot 送 move 的節流 (ms)，跟真實 client 一致 (20/s) */
 const MOVE_INTERVAL_MS = 333;
 /** true = 常態走動；false = 集中一點 */
-const BOT_NORMAL_WALK = false;
+const BOT_NORMAL_WALK = true;
 const CLUSTER_CENTER_X = 2200;
 const CLUSTER_CENTER_Y = 2200;
 const CLUSTER_SPREAD = 600;
 /** 壓測上限人數 */
 const STRESS_MAX = 800;
 /** 每批新增人數 */
-const STRESS_STEP = 20;
+const STRESS_STEP = 10;
 /** 每批新增後等待時間 (ms) */
-const STRESS_HOLD_MS = 2000;
+const STRESS_HOLD_MS = 3000;
 /** 壓測目標 WebSocket URL */
-const STRESS_URL = "ws://43.212.240.174:8088";
+const STRESS_URL = "ws://43.212.250.96:8088";
 
 // ----------------------------------------------------------------------
 // Bot 全域發送專用 Buffer (9 Bytes) - 避免 Bot 端的 GC 影響測量精準度
@@ -270,7 +270,7 @@ class StressTest {
       for (let i = 0; i < batch; i++) {
         this.spawnBot(total + i);
         // 每建立一個連線停 15ms，避免壓測機 Socket 瞬間衝爆
-        await this.sleep(15);
+        await this.sleep(200);
       }
       total += batch;
       // 等一批連上 + 穩定跑一個 hold 期間
