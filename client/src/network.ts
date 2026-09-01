@@ -1,5 +1,5 @@
 /**
- * 極速二進位 Network 模組 (Zero-Alloc & iOS 保活優化版)
+ * 極速二進位 Network 模組 (真 Zero-Alloc 物件池 & iOS 保活優化版)
  */
 
 export enum Opcode {
@@ -8,7 +8,7 @@ export enum Opcode {
   Enter = 3,
   Leave = 4,
   Update = 5,
-  Ping = 6, // 🟢 新增 Ping 心跳 (1 Byte)
+  Ping = 6,
 }
 
 export interface BinaryPlayerState {
@@ -36,8 +36,14 @@ let gapWindowStart = 0;
 let gapBuckets = { g60: 0, g100: 0, g200: 0 };
 
 // ----------------------------------------------------------------------
-// 🟢 1. Zero-Alloc 全域重用解包陣列與物件池
+// 🟢 1. 真 Zero-Alloc 全域物件池 (徹底消滅 { id, x, y } 垃圾)
 // ----------------------------------------------------------------------
+const MAX_POOL_SIZE = 250;
+const playerObjectPool: BinaryPlayerState[] = Array.from(
+  { length: MAX_POOL_SIZE },
+  () => ({ id: 0, x: 0, y: 0 })
+);
+
 const reusablePlayersArray: BinaryPlayerState[] = [];
 const reusableIdsArray: number[] = [];
 
@@ -104,7 +110,6 @@ export function connect(url: string, h: Handlers): void {
   ws.onmessage = (ev: MessageEvent) => {
     if (!handlers || !(ev.data instanceof ArrayBuffer)) return;
 
-    // 🟢 防禦性檢查：避免 DataView 讀取空封包越界
     if (ev.data.byteLength < 1) return;
 
     // ------------------------------------------------------------------
@@ -139,7 +144,6 @@ export function connect(url: string, h: Handlers): void {
     const opcode = view.getUint8(0) as Opcode;
 
     switch (opcode) {
-      // 1. OP_INIT [1B Opcode][2B SelfId][4B X][4B Y]
       case Opcode.Init: {
         if (ev.data.byteLength < 11) return;
         const selfId = view.getUint16(1, true);
@@ -149,24 +153,27 @@ export function connect(url: string, h: Handlers): void {
         break;
       }
 
-      // 2. OP_MOVE, OP_ENTER, OP_UPDATE
       case Opcode.Move:
       case Opcode.Enter:
       case Opcode.Update: {
         if (ev.data.byteLength < 3) return;
         const count = view.getUint16(1, true);
 
-        // 🟢 重用陣列，避免每幀產生物件垃圾 (Zero-Alloc Unpacking)
         reusablePlayersArray.length = 0;
         let offset = 3;
 
         for (let i = 0; i < count; i++) {
           if (offset + 10 > ev.data.byteLength) break;
-          const id = view.getUint16(offset, true);
-          const x = view.getFloat32(offset + 2, true);
-          const y = view.getFloat32(offset + 6, true);
 
-          reusablePlayersArray.push({ id, x, y });
+          // 🟢 使用物件池的物件，絕不產生新記憶體物件
+          const p =
+            playerObjectPool[i] ||
+            (playerObjectPool[i] = { id: 0, x: 0, y: 0 });
+          p.id = view.getUint16(offset, true);
+          p.x = view.getFloat32(offset + 2, true);
+          p.y = view.getFloat32(offset + 6, true);
+
+          reusablePlayersArray.push(p);
           offset += 10;
         }
 
@@ -177,7 +184,6 @@ export function connect(url: string, h: Handlers): void {
         break;
       }
 
-      // 3. OP_LEAVE
       case Opcode.Leave: {
         if (ev.data.byteLength < 3) return;
         const count = view.getUint16(1, true);
@@ -201,7 +207,6 @@ export function connect(url: string, h: Handlers): void {
     stopHeartbeat();
     if (paused || !handlers || !wsUrl) return;
 
-    // 🟢 避峰重連：1s ~ 2.5s 隨機退避，避免伺服器遭重連海嘯打癱
     const jitter = 1000 + Math.random() * 1500;
     console.warn(
       `[network] disconnected, retrying in ${(jitter / 1000).toFixed(1)}s`

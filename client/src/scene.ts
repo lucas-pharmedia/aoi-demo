@@ -40,7 +40,7 @@ interface RemotePlayer {
 }
 
 /** 🟢 內插緩衝區：伺服器 8 Hz (125ms)，設定為 220ms 可完全抵抗網路抖動並維持極致絲滑 */
-const BUFFER_DELAY_MS = 300;
+const BUFFER_DELAY_MS = 500;
 /** 緩衝區最多留幾筆快照 */
 const MAX_BUFFER_SNAPSHOTS = 120;
 /** 🟢 前端向伺服器發送移動位置的最小間隔 (ms) - 設為 80ms (~12.5Hz) 與 8Hz 伺服器完美匹配 */
