@@ -56,8 +56,8 @@ interface PendingRemote {
   buffer: RemoteSnap[];
 }
 
-/** 🟢 8Hz 伺服器 (125ms)，設定 200ms 的緩衝時間，確保穩定拿到連續 2 筆快照 */
-const BUFFER_DELAY_MS = 200;
+/** 🟢 8Hz 伺服器 (125ms)，設定 180ms 緩衝延遲可提供最完備的去抖動緩衝 */
+const BUFFER_DELAY_MS = 180;
 /** 緩衝區最多留幾筆快照 */
 const MAX_BUFFER_SNAPSHOTS = 60;
 /** 🟢 前端發送移動位置的最小間隔 (ms) */
@@ -244,9 +244,6 @@ export class GameScene extends Phaser.Scene {
     );
   }
 
-  /**
-   * 🟢 紀錄正確的接收時間戳（正確綁定客戶端網路脈衝）
-   */
   private pushRemoteSnap(p: BinaryPlayerState): void {
     if (p.id === this.selfId || this.selfId === 0) return;
 
@@ -399,15 +396,16 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * 🟢 完全修正的 Lerp 演算法：閉環範圍控制 (Clamp 防跳格)
+   * 🟢 指數平滑衰減插值 (Smooth Damp Interpolation)
+   * 消除 8Hz 低頻採樣率帶來的速度折角，達成商業級連續絲滑移動
    */
-  private lerpRemotes(_delta: number): void {
+  private lerpRemotes(delta: number): void {
     const renderTime = performance.now() - BUFFER_DELAY_MS;
 
     for (const rp of this.remotes.values()) {
       const buf = rp.buffer;
 
-      // 1. 保留近期的快照，丟棄過期快照
+      // 1. 丟棄比 renderTime 還要舊的過期快照（保留至少 2 筆供插值計算）
       while (buf.length > 2 && buf[1].t <= renderTime) {
         buf.shift();
       }
@@ -429,26 +427,29 @@ export class GameScene extends Phaser.Scene {
           targetX = s2.x;
           targetY = s2.y;
         } else {
-          // 🟢 防暴衝核心：Clamp 強制將比例鎖定在 0 ~ 1 之間，絕不超範圍外推
           const rawT = (renderTime - s1.t) / seg;
           const t = Phaser.Math.Clamp(rawT, 0, 1);
-
           targetX = Phaser.Math.Linear(s1.x, s2.x, t);
           targetY = Phaser.Math.Linear(s1.y, s2.y, t);
         }
       }
 
-      // 2. 更新座標與繪圖層級
-      rp.sprite.x = targetX;
-      rp.sprite.y = targetY;
-      rp.sprite.setDepth(targetY);
+      // 🟢 2. 核心：使用 Smooth Damp（指數平滑）進行二次去抖動
+      const smoothFactor = 1 - Math.exp(-0.018 * delta);
+      const finalX = Phaser.Math.Linear(prevX, targetX, smoothFactor);
+      const finalY = Phaser.Math.Linear(prevY, targetY, smoothFactor);
 
-      // 3. 計算實際移動量以控制腳步動畫
-      const frameDx = targetX - prevX;
-      const frameDy = targetY - prevY;
+      // 3. 套用平滑後的實體座標與繪圖深度
+      rp.sprite.x = finalX;
+      rp.sprite.y = finalY;
+      rp.sprite.setDepth(finalY);
+
+      // 4. 計算本影格實質發生的位移量以控制腳步動畫
+      const frameDx = finalX - prevX;
+      const frameDy = finalY - prevY;
       const actualMovedDist = Math.hypot(frameDx, frameDy);
 
-      if (actualMovedDist > 0.1) {
+      if (actualMovedDist > 0.08) {
         const dir = directionFromDelta(frameDx, frameDy);
         rp.lastDir = dir;
         const animKey = walkAnimKey(rp.textureKey, dir);
