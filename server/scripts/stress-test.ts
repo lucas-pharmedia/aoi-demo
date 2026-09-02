@@ -23,8 +23,8 @@ if (existsSync(envPath)) {
 const LAG_THRESHOLD_MS = 600;
 /** 🟢 連線後等 init 的逾時 (ms)，拉長至 10 秒，適應 3Hz 低頻率 Server 佇列 */
 const INIT_TIMEOUT_MS = 10000;
-/** 每個 bot 送 move 的節流 (ms)，跟真實 client 一致 (20/s) */
-const MOVE_INTERVAL_MS = 50;
+/** 每個 bot 送 move 的節流 (ms)，跟真實 client SEND_MOVE_INTERVAL_MS 一致 */
+const MOVE_INTERVAL_MS = 80;
 /** true = 常態走動；false = 集中一點 */
 const BOT_NORMAL_WALK = true;
 const CLUSTER_CENTER_X = 2200;
@@ -217,13 +217,12 @@ class StressTest {
 
   private pickRandomDir(bot: Bot): void {
     const angle = Math.random() * Math.PI * 2;
-    const speed = 200;
+    const speed = 400;
     bot.vx = Math.cos(angle) * speed;
     bot.vy = Math.sin(angle) * speed;
-    // 0.5~1.5 秒後換方向（模擬真人走走停停換向）
     bot.dirTimer = setTimeout(() => {
       if (bot.ws.readyState === WebSocket.OPEN) this.pickRandomDir(bot);
-    }, 500 + Math.random() * 1000);
+    }, 1500 + Math.random() * 1500);
   }
 
   /** 極速二進位傳送移動封包 */
