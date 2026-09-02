@@ -56,11 +56,11 @@ interface PendingRemote {
   buffer: RemoteSnap[];
 }
 
-/** 🟢 內插緩衝區：伺服器 8 Hz (125ms)，設定為 220ms 可完全抵抗網路抖動並維持極致絲滑 */
-const BUFFER_DELAY_MS = 220;
+/** 🟢 8Hz 伺服器 (125ms)，設定 200ms 的緩衝時間，確保穩定拿到連續 2 筆快照 */
+const BUFFER_DELAY_MS = 200;
 /** 緩衝區最多留幾筆快照 */
-const MAX_BUFFER_SNAPSHOTS = 120;
-/** 🟢 前端向伺服器發送移動位置的最小間隔 (ms) - 設為 80ms (~12.5Hz) 與 8Hz 伺服器完美匹配 */
+const MAX_BUFFER_SNAPSHOTS = 60;
+/** 🟢 前端發送移動位置的最小間隔 (ms) */
 const SEND_MOVE_INTERVAL_MS = 80;
 
 export class GameScene extends Phaser.Scene {
@@ -70,14 +70,12 @@ export class GameScene extends Phaser.Scene {
   private aoiOverlay!: Phaser.GameObjects.Graphics;
   private remotes = new Map<number, RemotePlayer>();
   private pendingRemotes = new Map<number, PendingRemote>();
-  /** textureKey → 進行中的載入 Promise（同 key 共用，避免重複請求） */
   private textureLoadPromises = new Map<string, Promise<string>>();
   private lastSend = 0;
   private lastGridId = -1;
   private lastTotal = -1;
   private fpsOverlay!: FpsOverlay;
   private teardownNetwork: (() => void) | null = null;
-  /** 真實玩家造型 ID（頁面 `?player=`）；0 = 無參數／機器人 → 本地預設 sprite */
   private selfPlayerId = 0;
 
   constructor() {
@@ -89,7 +87,6 @@ export class GameScene extends Phaser.Scene {
     for (const key of WORLD_HOME_TEXTURE_KEYS) {
       this.load.image(key, `assets/world/home/map-objects/${key}.png`);
     }
-    // 僅預載本地預設（機器人／playerId=0）；1~10 改 Enter／Init 動態載
     this.load.spritesheet(
       PLAYER_SPRITE_TEXTURE_KEY,
       "assets/world/player-sprite.png",
@@ -123,7 +120,6 @@ export class GameScene extends Phaser.Scene {
       this.teardownNetwork = null;
     });
 
-    // 真實玩家：頁面 ?player=1~10 → WS 帶參數；機器人／無參數 → 不帶（playerId=0）
     this.selfPlayerId = resolveSelfPlayerIdFromPage();
     const baseWsUrl =
       import.meta.env.VITE_WS_URL ?? `ws://${location.hostname}:8088`;
@@ -145,7 +141,6 @@ export class GameScene extends Phaser.Scene {
     );
   }
 
-  /** 分頁切回前景重連前清場，等同重開網頁的 client 狀態 */
   private resetWorldForReconnect(): void {
     for (const rp of this.remotes.values()) {
       rp.sprite.destroy();
@@ -160,10 +155,6 @@ export class GameScene extends Phaser.Scene {
     this.lastSend = 0;
   }
 
-  /**
-   * 動態載入造型 spritesheet（最終版也會走這條）。
-   * 無 URL / 已載入 → 立刻回傳 key；失敗 → fallback 本地預設。
-   */
   private ensurePlayerTextureLoaded(playerId: number): Promise<string> {
     const textureKey = resolvePlayerSpriteTextureKey(
       playerId,
@@ -243,7 +234,7 @@ export class GameScene extends Phaser.Scene {
     this.selfId = p.selfId;
     void this.ensurePlayerTextureLoaded(this.selfPlayerId).then(
       (textureKey) => {
-        if (this.selfId !== p.selfId) return; // 重連期間作廢
+        if (this.selfId !== p.selfId) return;
         this.playerManager?.createPlayer({ x: p.x, y: p.y }, textureKey);
         const player = this.playerManager?.getPlayer();
         if (player) {
@@ -253,9 +244,12 @@ export class GameScene extends Phaser.Scene {
     );
   }
 
-  /** 已存在 remote／pending → 只推座標；否則不新建（Move 無 playerId） */
+  /**
+   * 🟢 紀錄正確的接收時間戳（正確綁定客戶端網路脈衝）
+   */
   private pushRemoteSnap(p: BinaryPlayerState): void {
     if (p.id === this.selfId || this.selfId === 0) return;
+
     const snap: RemoteSnap = { t: performance.now(), x: p.x, y: p.y };
 
     const existing = this.remotes.get(p.id);
@@ -273,7 +267,6 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Enter / Update：有 playerId → 動態載圖後建 sprite */
   private upsertRemote(p: BinaryPlayerState): void {
     if (p.id === this.selfId || this.selfId === 0) return;
 
@@ -302,7 +295,7 @@ export class GameScene extends Phaser.Scene {
     const playerId = p.playerId;
     void this.ensurePlayerTextureLoaded(playerId).then((textureKey) => {
       const pendingNow = this.pendingRemotes.get(remoteId);
-      if (!pendingNow) return; // Leave 或重連已清掉
+      if (!pendingNow) return;
       this.pendingRemotes.delete(remoteId);
       if (this.remotes.has(remoteId)) return;
 
@@ -348,7 +341,6 @@ export class GameScene extends Phaser.Scene {
   }
 
   private handleMove(players: BinaryPlayerState[]): void {
-    // Move 無 playerId：只更新已在場／載圖中的人，不新建
     for (const p of players) this.pushRemoteSnap(p);
   }
 
@@ -406,62 +398,75 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** 🟢 商業級平滑插值演算法 (完全修復時間軸逆流與忽快忽慢問題) */
+  /**
+   * 🟢 完全修正的 Lerp 演算法：閉環範圍控制 (Clamp 防跳格)
+   */
   private lerpRemotes(_delta: number): void {
     const renderTime = performance.now() - BUFFER_DELAY_MS;
 
     for (const rp of this.remotes.values()) {
       const buf = rp.buffer;
 
-      // 1. 丟棄比 renderTime 還要舊的過期快照（保留至少 2 筆供插值）
+      // 1. 保留近期的快照，丟棄過期快照
       while (buf.length > 2 && buf[1].t <= renderTime) {
         buf.shift();
       }
 
-      let x = rp.sprite.x;
-      let y = rp.sprite.y;
-      const prevX = x;
-      const prevY = y;
+      const prevX = rp.sprite.x;
+      const prevY = rp.sprite.y;
+      let targetX = prevX;
+      let targetY = prevY;
 
       if (buf.length === 1) {
-        x = buf[0].x;
-        y = buf[0].y;
+        targetX = buf[0].x;
+        targetY = buf[0].y;
       } else if (buf.length >= 2) {
         const s1 = buf[0];
         const s2 = buf[1];
-        const seg = s2.t - s1.t || 1;
+        const seg = s2.t - s1.t;
 
-        if (renderTime < s1.t) {
-          x = s1.x;
-          y = s1.y;
-        } else if (renderTime <= s2.t) {
-          const t = Phaser.Math.Clamp((renderTime - s1.t) / seg, 0, 1);
-          x = Phaser.Math.Linear(s1.x, s2.x, t);
-          y = Phaser.Math.Linear(s1.y, s2.y, t);
+        if (seg <= 0) {
+          targetX = s2.x;
+          targetY = s2.y;
         } else {
-          x = s2.x;
-          y = s2.y;
+          // 🟢 防暴衝核心：Clamp 強制將比例鎖定在 0 ~ 1 之間，絕不超範圍外推
+          const rawT = (renderTime - s1.t) / seg;
+          const t = Phaser.Math.Clamp(rawT, 0, 1);
+
+          targetX = Phaser.Math.Linear(s1.x, s2.x, t);
+          targetY = Phaser.Math.Linear(s1.y, s2.y, t);
         }
       }
 
-      // 2. 設定新座標與繪圖層級
-      rp.sprite.x = x;
-      rp.sprite.y = y;
-      rp.sprite.setDepth(rp.sprite.y);
+      // 2. 更新座標與繪圖層級
+      rp.sprite.x = targetX;
+      rp.sprite.y = targetY;
+      rp.sprite.setDepth(targetY);
 
-      // 3. 依據當前影格 (16.6ms) 的實質物理位移量控制腳步動畫
-      const frameDx = x - prevX;
-      const frameDy = y - prevY;
+      // 3. 計算實際移動量以控制腳步動畫
+      const frameDx = targetX - prevX;
+      const frameDy = targetY - prevY;
       const actualMovedDist = Math.hypot(frameDx, frameDy);
 
-      if (actualMovedDist > 0.05) {
+      if (actualMovedDist > 0.1) {
         const dir = directionFromDelta(frameDx, frameDy);
         rp.lastDir = dir;
         const animKey = walkAnimKey(rp.textureKey, dir);
-        rp.sprite.play(animKey, true);
-      } else if (rp.sprite.anims.isPlaying) {
-        rp.sprite.anims.stop();
-        rp.sprite.setFrame(WALK_ANIM_FRAMES[rp.lastDir].start + 1);
+
+        if (
+          !rp.sprite.anims.isPlaying ||
+          rp.sprite.anims.currentAnim?.key !== animKey
+        ) {
+          rp.sprite.play(animKey, true);
+        }
+      } else {
+        if (rp.sprite.anims.isPlaying) {
+          rp.sprite.anims.stop();
+        }
+        const idleFrame = WALK_ANIM_FRAMES[rp.lastDir].start + 1;
+        if (rp.sprite.frame.name !== String(idleFrame)) {
+          rp.sprite.setFrame(idleFrame);
+        }
       }
     }
   }
@@ -489,7 +494,6 @@ export class GameScene extends Phaser.Scene {
     const player = this.playerManager?.getPlayer();
     if (player && (player.keyboardMoveActive || player.isPathMoving)) {
       const now = this.time.now;
-      // 🟢 發送間隔改為 80ms (~12.5Hz)，完美適應 8Hz 伺服器
       if (now - this.lastSend >= SEND_MOVE_INTERVAL_MS) {
         sendMove(player.sprite.x, player.sprite.y);
         this.lastSend = now;
@@ -498,7 +502,6 @@ export class GameScene extends Phaser.Scene {
   }
 }
 
-/** 真實玩家頁面 `?player=1~10`；無參數／無效 → 0（機器人／預設本地 sprite） */
 function resolveSelfPlayerIdFromPage(): number {
   const raw = new URLSearchParams(location.search).get("player");
   const n = raw ? Number(raw) : NaN;
