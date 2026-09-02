@@ -57,7 +57,7 @@ interface PendingRemote {
 }
 
 /** 🟢 內插緩衝區：伺服器 8 Hz (125ms)，設定為 220ms 可完全抵抗網路抖動並維持極致絲滑 */
-const BUFFER_DELAY_MS = 500;
+const BUFFER_DELAY_MS = 220;
 /** 緩衝區最多留幾筆快照 */
 const MAX_BUFFER_SNAPSHOTS = 120;
 /** 🟢 前端向伺服器發送移動位置的最小間隔 (ms) - 設為 80ms (~12.5Hz) 與 8Hz 伺服器完美匹配 */
@@ -129,7 +129,9 @@ export class GameScene extends Phaser.Scene {
       import.meta.env.VITE_WS_URL ?? `ws://${location.hostname}:8088`;
     const wsUrl =
       this.selfPlayerId > 0
-        ? `${baseWsUrl}${baseWsUrl.includes("?") ? "&" : "?"}player=${this.selfPlayerId}`
+        ? `${baseWsUrl}${baseWsUrl.includes("?") ? "&" : "?"}player=${
+            this.selfPlayerId
+          }`
         : baseWsUrl;
     connect(wsUrl, {
       onInit: (p) => this.handleInit(p),
@@ -239,14 +241,16 @@ export class GameScene extends Phaser.Scene {
 
   private handleInit(p: { selfId: number; x: number; y: number }): void {
     this.selfId = p.selfId;
-    void this.ensurePlayerTextureLoaded(this.selfPlayerId).then((textureKey) => {
-      if (this.selfId !== p.selfId) return; // 重連期間作廢
-      this.playerManager?.createPlayer({ x: p.x, y: p.y }, textureKey);
-      const player = this.playerManager?.getPlayer();
-      if (player) {
-        sendMove(player.sprite.x, player.sprite.y);
+    void this.ensurePlayerTextureLoaded(this.selfPlayerId).then(
+      (textureKey) => {
+        if (this.selfId !== p.selfId) return; // 重連期間作廢
+        this.playerManager?.createPlayer({ x: p.x, y: p.y }, textureKey);
+        const player = this.playerManager?.getPlayer();
+        if (player) {
+          sendMove(player.sprite.x, player.sprite.y);
+        }
       }
-    });
+    );
   }
 
   /** 已存在 remote／pending → 只推座標；否則不新建（Move 無 playerId） */
@@ -265,8 +269,7 @@ export class GameScene extends Phaser.Scene {
     const pending = this.pendingRemotes.get(p.id);
     if (pending) {
       pending.buffer.push(snap);
-      if (pending.buffer.length > MAX_BUFFER_SNAPSHOTS)
-        pending.buffer.shift();
+      if (pending.buffer.length > MAX_BUFFER_SNAPSHOTS) pending.buffer.shift();
     }
   }
 
@@ -286,8 +289,7 @@ export class GameScene extends Phaser.Scene {
     const pending = this.pendingRemotes.get(p.id);
     if (pending) {
       pending.buffer.push(snap);
-      if (pending.buffer.length > MAX_BUFFER_SNAPSHOTS)
-        pending.buffer.shift();
+      if (pending.buffer.length > MAX_BUFFER_SNAPSHOTS) pending.buffer.shift();
       return;
     }
 
