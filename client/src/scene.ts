@@ -59,9 +59,8 @@ interface PendingRemote {
 
 /** 緩衝區最多留幾筆快照 */
 const MAX_BUFFER_SNAPSHOTS = 60;
-/** 🟢 前端發送移動位置的最小間隔 (ms) */
+/** 前端發送移動位置的最小間隔 (ms) */
 const SEND_MOVE_INTERVAL_MS = 80;
-/** 🟢 其他玩家在畫面上移動的「絕對固定速度」(像素/秒) - 請調整至與本地玩家速度完全相同 */
 
 export class GameScene extends Phaser.Scene {
   mapManager!: MapManager;
@@ -244,9 +243,6 @@ export class GameScene extends Phaser.Scene {
     );
   }
 
-  /**
-   * 🟢 Zero-GC 導向：收到快照時推入隊列
-   */
   private pushRemoteSnap(p: BinaryPlayerState): void {
     if (p.id === this.selfId || this.selfId === 0) return;
 
@@ -260,7 +256,6 @@ export class GameScene extends Phaser.Scene {
 
     if (targetBuffer) {
       if (targetBuffer.length >= MAX_BUFFER_SNAPSHOTS) {
-        // 物件重用，減少垃圾回收
         const recycledSnap = targetBuffer.shift()!;
         recycledSnap.t = performance.now();
         recycledSnap.x = p.x;
@@ -349,7 +344,6 @@ export class GameScene extends Phaser.Scene {
   private handleUpdate(players: BinaryPlayerState[]): void {
     for (const p of players) this.upsertRemote(p);
 
-    // 避免 new Set 的 Zero-GC 清理寫法
     for (const id of this.remotes.keys()) {
       let found = false;
       for (let i = 0; i < players.length; i++) {
@@ -409,21 +403,34 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * 🟢 100% 絕對勻速演算法 (Fixed-Speed Target Chase)
-   * 徹底丟棄網路時間戳，角色僅以 PLAYER_SPEED 向量前進，永遠無忽快忽慢！
+   * 🟢 徹底消滅動畫重置抖動的反抖動插值 (Non-Resetting Animation Lerp)
    */
   private lerpRemotes(delta: number): void {
-    const dt = delta / 1000; // 轉換為秒單位
+    const dt = delta / 1000;
 
     for (const rp of this.remotes.values()) {
       const buf = rp.buffer;
 
-      // 如果隊列裡累積超過 1 筆快照，丟棄舊快照，永遠朝「最新收到」的座標點前進
-      while (buf.length > 1) {
-        buf.shift();
+      // 網路卡頓嚴重時丟棄舊包
+      if (buf.length > 6) {
+        buf.splice(0, buf.length - 2);
       }
 
-      if (buf.length === 0) continue;
+      if (buf.length === 0) {
+        // 沒有任何包時靜止，切回靜止 Frame
+        if (rp.sprite.anims.isPlaying) {
+          rp.sprite.anims.stop();
+          const idleFrame = WALK_ANIM_FRAMES[rp.lastDir].start + 1;
+          rp.sprite.setFrame(idleFrame);
+        }
+        continue;
+      }
+
+      // 起步保護水墊：靜止狀態等 2 包建立水位才動
+      const isStopped = !rp.sprite.anims.isPlaying;
+      if (isStopped && buf.length < 2) {
+        continue;
+      }
 
       const target = buf[0];
       const currentX = rp.sprite.x;
@@ -433,38 +440,46 @@ export class GameScene extends Phaser.Scene {
       const dy = target.y - currentY;
       const distToTarget = Math.hypot(dx, dy);
 
-      // 當距離目標點 > 0.5 像素時，以絕對固定速度前進
-      if (distToTarget > 0.5) {
-        // 1. 每影格移動距離 = 固定速度 × 時間
-        const step = Math.min(distToTarget, PLAYER_SPEED * dt);
-        const angle = Math.atan2(dy, dx);
+      // 到達當前點，消耗並繼續指向下一個點
+      if (distToTarget <= 0.8) {
+        buf.shift();
+        if (buf.length === 0) {
+          if (rp.sprite.anims.isPlaying) {
+            rp.sprite.anims.stop();
+            const idleFrame = WALK_ANIM_FRAMES[rp.lastDir].start + 1;
+            rp.sprite.setFrame(idleFrame);
+          }
+          continue;
+        }
+      }
 
-        const nextX = currentX + Math.cos(angle) * step;
-        const nextY = currentY + Math.sin(angle) * step;
+      // 勻速位移
+      const step = Math.min(distToTarget, PLAYER_SPEED * dt);
+      const angle = Math.atan2(dy, dx);
 
-        rp.sprite.x = nextX;
-        rp.sprite.y = nextY;
-        rp.sprite.setDepth(nextY);
+      const moveX = Math.cos(angle) * step;
+      const moveY = Math.sin(angle) * step;
 
-        // 2. 控制腳步動畫
-        const dir = directionFromDelta(nextX - currentX, nextY - currentY);
-        rp.lastDir = dir;
-        const animKey = walkAnimKey(rp.textureKey, dir);
+      const nextX = currentX + moveX;
+      const nextY = currentY + moveY;
 
+      rp.sprite.x = nextX;
+      rp.sprite.y = nextY;
+      rp.sprite.setDepth(nextY);
+
+      // 🟢 修復核心：只有真實發生 > 0.5px 的顯著位移時，才計算並更新方向，防浮點數高頻重置動畫
+      if (Math.hypot(moveX, moveY) > 0.5) {
+        const newDir = directionFromDelta(moveX, moveY);
+        rp.lastDir = newDir;
+
+        const animKey = walkAnimKey(rp.textureKey, newDir);
+        // 只有當前動畫 key 真的不同，或目前是靜止狀態時才重載 play()
         if (
           !rp.sprite.anims.isPlaying ||
           rp.sprite.anims.currentAnim?.key !== animKey
         ) {
+          // 第二個參數 ignoreIfPlaying 為 true：如果動畫已在播放且 key 相同，絕對不重置 Frame 0！
           rp.sprite.play(animKey, true);
-        }
-      } else {
-        // 已達到最新目標點，強制停止動畫並切回靜止 Frame
-        if (rp.sprite.anims.isPlaying) {
-          rp.sprite.anims.stop();
-        }
-        const idleFrame = WALK_ANIM_FRAMES[rp.lastDir].start + 1;
-        if (rp.sprite.frame.name !== String(idleFrame)) {
-          rp.sprite.setFrame(idleFrame);
         }
       }
     }
