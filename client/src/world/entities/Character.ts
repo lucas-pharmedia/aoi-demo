@@ -35,6 +35,10 @@ export abstract class Character {
     this.walkSpeed = options.walkSpeed;
   }
 
+  protected getTextureKey(): string {
+    return this.textureKey;
+  }
+
   /** 預設：依 y 排序。子類別可 `override`（例如飛行中不改 depth）。 */
   tick(): void {
     if (!this.sprite.active) return;

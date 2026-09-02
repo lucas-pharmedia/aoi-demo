@@ -16,6 +16,10 @@ import {
   WALK_ANIM_FRAMES,
 } from "./world/constants/gameConfig.ts";
 import {
+  getPlayerSpriteUrl,
+  resolvePlayerSpriteTextureKey,
+} from "./world/constants/playerSpriteUrls.ts";
+import {
   directionFromDelta,
   registerSpriteWalkAnimations,
 } from "./world/services/spriteWalk.ts";
@@ -32,11 +36,24 @@ import {
 } from "../../shared/grid.ts";
 import { FpsOverlay } from "./ui/fps.ts";
 
+interface RemoteSnap {
+  t: number;
+  x: number;
+  y: number;
+}
+
 interface RemotePlayer {
   sprite: Phaser.GameObjects.Sprite;
-  buffer: { t: number; x: number; y: number }[];
+  buffer: RemoteSnap[];
   lastDir: Direction;
   leaving: boolean;
+  textureKey: string;
+}
+
+/** Enter 載圖中：先收座標，texture 就緒再建 sprite */
+interface PendingRemote {
+  playerId: number;
+  buffer: RemoteSnap[];
 }
 
 /** 🟢 內插緩衝區：伺服器 8 Hz (125ms)，設定為 220ms 可完全抵抗網路抖動並維持極致絲滑 */
@@ -52,11 +69,16 @@ export class GameScene extends Phaser.Scene {
   private selfId = 0; // 數字 ID
   private aoiOverlay!: Phaser.GameObjects.Graphics;
   private remotes = new Map<number, RemotePlayer>();
+  private pendingRemotes = new Map<number, PendingRemote>();
+  /** textureKey → 進行中的載入 Promise（同 key 共用，避免重複請求） */
+  private textureLoadPromises = new Map<string, Promise<string>>();
   private lastSend = 0;
   private lastGridId = -1;
   private lastTotal = -1;
   private fpsOverlay!: FpsOverlay;
   private teardownNetwork: (() => void) | null = null;
+  /** 真實玩家造型 ID（頁面 `?player=`）；0 = 無參數／機器人 → 本地預設 sprite */
+  private selfPlayerId = 0;
 
   constructor() {
     super("game");
@@ -67,6 +89,7 @@ export class GameScene extends Phaser.Scene {
     for (const key of WORLD_HOME_TEXTURE_KEYS) {
       this.load.image(key, `assets/world/home/map-objects/${key}.png`);
     }
+    // 僅預載本地預設（機器人／playerId=0）；1~10 改 Enter／Init 動態載
     this.load.spritesheet(
       PLAYER_SPRITE_TEXTURE_KEY,
       "assets/world/player-sprite.png",
@@ -100,8 +123,14 @@ export class GameScene extends Phaser.Scene {
       this.teardownNetwork = null;
     });
 
-    const wsUrl =
+    // 真實玩家：頁面 ?player=1~10 → WS 帶參數；機器人／無參數 → 不帶（playerId=0）
+    this.selfPlayerId = resolveSelfPlayerIdFromPage();
+    const baseWsUrl =
       import.meta.env.VITE_WS_URL ?? `ws://${location.hostname}:8088`;
+    const wsUrl =
+      this.selfPlayerId > 0
+        ? `${baseWsUrl}${baseWsUrl.includes("?") ? "&" : "?"}player=${this.selfPlayerId}`
+        : baseWsUrl;
     connect(wsUrl, {
       onInit: (p) => this.handleInit(p),
       onEnter: (players) => this.handleEnter(players),
@@ -120,12 +149,68 @@ export class GameScene extends Phaser.Scene {
       rp.sprite.destroy();
     }
     this.remotes.clear();
+    this.pendingRemotes.clear();
     this.playerManager?.destroyPlayer();
     this.aoiOverlay?.clear();
     this.selfId = 0;
     this.lastGridId = -1;
     this.lastTotal = -1;
     this.lastSend = 0;
+  }
+
+  /**
+   * 動態載入造型 spritesheet（最終版也會走這條）。
+   * 無 URL / 已載入 → 立刻回傳 key；失敗 → fallback 本地預設。
+   */
+  private ensurePlayerTextureLoaded(playerId: number): Promise<string> {
+    const textureKey = resolvePlayerSpriteTextureKey(
+      playerId,
+      PLAYER_SPRITE_TEXTURE_KEY
+    );
+    if (textureKey === PLAYER_SPRITE_TEXTURE_KEY) {
+      return Promise.resolve(textureKey);
+    }
+    if (this.textures.exists(textureKey)) {
+      if (!this.anims.exists(walkAnimKey(textureKey, "down"))) {
+        registerSpriteWalkAnimations(this, textureKey);
+      }
+      return Promise.resolve(textureKey);
+    }
+
+    const inflight = this.textureLoadPromises.get(textureKey);
+    if (inflight) return inflight;
+
+    const url = getPlayerSpriteUrl(playerId);
+    if (!url) return Promise.resolve(PLAYER_SPRITE_TEXTURE_KEY);
+
+    const promise = new Promise<string>((resolve) => {
+      let settled = false;
+      const finishOk = (): void => {
+        if (settled) return;
+        settled = true;
+        this.textureLoadPromises.delete(textureKey);
+        registerSpriteWalkAnimations(this, textureKey);
+        resolve(textureKey);
+      };
+      const finishFail = (): void => {
+        if (settled) return;
+        settled = true;
+        this.textureLoadPromises.delete(textureKey);
+        console.warn(`[sprite] load failed playerId=${playerId}, fallback`);
+        resolve(PLAYER_SPRITE_TEXTURE_KEY);
+      };
+
+      this.load.setCORS("anonymous");
+      this.load.spritesheet(textureKey, url, WORLD_CHARACTER_SHEET_FRAME);
+      this.load.once(`filecomplete-spritesheet-${textureKey}`, finishOk);
+      this.load.once("loaderror", (file: { key?: string }) => {
+        if (file?.key === textureKey) finishFail();
+      });
+      this.load.start();
+    });
+
+    this.textureLoadPromises.set(textureKey, promise);
+    return promise;
   }
 
   private drawStaticGrid(): void {
@@ -154,17 +239,21 @@ export class GameScene extends Phaser.Scene {
 
   private handleInit(p: { selfId: number; x: number; y: number }): void {
     this.selfId = p.selfId;
-    this.playerManager?.createPlayer({ x: p.x, y: p.y });
-    const player = this.playerManager?.getPlayer();
-    if (player) {
-      sendMove(player.sprite.x, player.sprite.y);
-    }
+    void this.ensurePlayerTextureLoaded(this.selfPlayerId).then((textureKey) => {
+      if (this.selfId !== p.selfId) return; // 重連期間作廢
+      this.playerManager?.createPlayer({ x: p.x, y: p.y }, textureKey);
+      const player = this.playerManager?.getPlayer();
+      if (player) {
+        sendMove(player.sprite.x, player.sprite.y);
+      }
+    });
   }
 
-  private upsertRemote(p: BinaryPlayerState): void {
+  /** 已存在 remote／pending → 只推座標；否則不新建（Move 無 playerId） */
+  private pushRemoteSnap(p: BinaryPlayerState): void {
     if (p.id === this.selfId || this.selfId === 0) return;
+    const snap: RemoteSnap = { t: performance.now(), x: p.x, y: p.y };
 
-    const snap = { t: performance.now(), x: p.x, y: p.y };
     const existing = this.remotes.get(p.id);
     if (existing) {
       existing.buffer.push(snap);
@@ -173,29 +262,74 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    const idleFrame = WALK_ANIM_FRAMES.down.start + 1;
-    // 🟢 取消淡入：Alpha 直接設為 1，進場立即可見
-    const sprite = this.add
-      .sprite(p.x, p.y, PLAYER_SPRITE_TEXTURE_KEY, idleFrame)
-      .setScale(2)
-      .setDepth(10)
-      .setAlpha(1);
-    sprite.setOrigin(
-      0.5,
-      (WORLD_CHARACTER_SHEET_FRAME.frameHeight - 14) /
-        WORLD_CHARACTER_SHEET_FRAME.frameHeight
-    );
-    sprite.texture.setFilter(Phaser.Textures.FilterMode.NEAREST);
+    const pending = this.pendingRemotes.get(p.id);
+    if (pending) {
+      pending.buffer.push(snap);
+      if (pending.buffer.length > MAX_BUFFER_SNAPSHOTS)
+        pending.buffer.shift();
+    }
+  }
 
-    this.remotes.set(p.id, {
-      sprite,
+  /** Enter / Update：有 playerId → 動態載圖後建 sprite */
+  private upsertRemote(p: BinaryPlayerState): void {
+    if (p.id === this.selfId || this.selfId === 0) return;
+
+    const snap: RemoteSnap = { t: performance.now(), x: p.x, y: p.y };
+    const existing = this.remotes.get(p.id);
+    if (existing) {
+      existing.buffer.push(snap);
+      if (existing.buffer.length > MAX_BUFFER_SNAPSHOTS)
+        existing.buffer.shift();
+      return;
+    }
+
+    const pending = this.pendingRemotes.get(p.id);
+    if (pending) {
+      pending.buffer.push(snap);
+      if (pending.buffer.length > MAX_BUFFER_SNAPSHOTS)
+        pending.buffer.shift();
+      return;
+    }
+
+    this.pendingRemotes.set(p.id, {
+      playerId: p.playerId,
       buffer: [snap],
-      lastDir: "down",
-      leaving: false,
+    });
+
+    const remoteId = p.id;
+    const playerId = p.playerId;
+    void this.ensurePlayerTextureLoaded(playerId).then((textureKey) => {
+      const pendingNow = this.pendingRemotes.get(remoteId);
+      if (!pendingNow) return; // Leave 或重連已清掉
+      this.pendingRemotes.delete(remoteId);
+      if (this.remotes.has(remoteId)) return;
+
+      const last = pendingNow.buffer[pendingNow.buffer.length - 1]!;
+      const idleFrame = WALK_ANIM_FRAMES.down.start + 1;
+      const sprite = this.add
+        .sprite(last.x, last.y, textureKey, idleFrame)
+        .setScale(2)
+        .setDepth(10)
+        .setAlpha(1);
+      sprite.setOrigin(
+        0.5,
+        (WORLD_CHARACTER_SHEET_FRAME.frameHeight - 14) /
+          WORLD_CHARACTER_SHEET_FRAME.frameHeight
+      );
+      sprite.texture.setFilter(Phaser.Textures.FilterMode.NEAREST);
+
+      this.remotes.set(remoteId, {
+        sprite,
+        buffer: pendingNow.buffer,
+        lastDir: "down",
+        leaving: false,
+        textureKey,
+      });
     });
   }
 
   private removeRemote(id: number): void {
+    this.pendingRemotes.delete(id);
     const rp = this.remotes.get(id);
     if (!rp) return;
 
@@ -212,13 +346,14 @@ export class GameScene extends Phaser.Scene {
   }
 
   private handleMove(players: BinaryPlayerState[]): void {
-    for (const p of players) this.upsertRemote(p);
+    // Move 無 playerId：只更新已在場／載圖中的人，不新建
+    for (const p of players) this.pushRemoteSnap(p);
   }
 
   private handleUpdate(players: BinaryPlayerState[]): void {
     const seen = new Set(players.map((p) => p.id));
     for (const p of players) this.upsertRemote(p);
-    for (const id of [...this.remotes.keys()]) {
+    for (const id of [...this.remotes.keys(), ...this.pendingRemotes.keys()]) {
       if (!seen.has(id)) this.removeRemote(id);
     }
   }
@@ -320,7 +455,7 @@ export class GameScene extends Phaser.Scene {
       if (actualMovedDist > 0.05) {
         const dir = directionFromDelta(frameDx, frameDy);
         rp.lastDir = dir;
-        const animKey = walkAnimKey(PLAYER_SPRITE_TEXTURE_KEY, dir);
+        const animKey = walkAnimKey(rp.textureKey, dir);
         rp.sprite.play(animKey, true);
       } else if (rp.sprite.anims.isPlaying) {
         rp.sprite.anims.stop();
@@ -359,4 +494,12 @@ export class GameScene extends Phaser.Scene {
       }
     }
   }
+}
+
+/** 真實玩家頁面 `?player=1~10`；無參數／無效 → 0（機器人／預設本地 sprite） */
+function resolveSelfPlayerIdFromPage(): number {
+  const raw = new URLSearchParams(location.search).get("player");
+  const n = raw ? Number(raw) : NaN;
+  if (Number.isFinite(n) && n >= 1 && n <= 255) return Math.floor(n);
+  return 0;
 }

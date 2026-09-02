@@ -9,7 +9,9 @@
  *   5. 休眠型自適應遊戲主迴圈 (解決 setImmediate 導致 CPU 100% 空轉與 Timer 漂移)
  *   6. QuickSelect (中點 Pivot，無 Math.random() 開銷)
  */
+import { parse } from "url";
 import { WebSocketServer, WebSocket } from "ws";
+import type { IncomingMessage } from "http";
 import {
   MAP_WIDTH,
   MAP_HEIGHT,
@@ -67,6 +69,8 @@ interface ConnectedPlayer {
   snapOffset: number;
   /** WebSocket ping/pong 探活；heartbeat 輪到時先清 false，收到 pong 再設回 true */
   isAlive: boolean;
+  /** 造型 ID：真實玩家 1~255（URL `?player=`）；機器人／未帶參數 = 0 */
+  playerId: number;
 }
 
 /** 所有玩家 */
@@ -156,7 +160,11 @@ function sendInitBinary(p: ConnectedPlayer) {
   p.ws.send(new Uint8Array(OUT_BUFFER, 0, 15));
 }
 
-/** 發送 Enter / Move / Update 複數玩家陣列封包 [1B Opcode][2B Count] + Count * [2B Id][4B X][4B Y] (10 Bytes/Person) */
+/**
+ * 發送 Enter / Move / Update 複數玩家陣列封包
+ * - Move:   Count * 10 Bytes (Id + X + Y)
+ * - Enter / Update: Count * 11 Bytes (Id + X + Y + playerId)
+ */
 function sendPlayerListBinary(
   p: ConnectedPlayer,
   opcode: Opcode,
@@ -169,12 +177,21 @@ function sendPlayerListBinary(
   OUT_VIEW.setUint16(1, count, true);
 
   let offset = 3;
+  const isFullSnapshot =
+    opcode === Opcode.Enter || opcode === Opcode.Update;
+
   for (let i = 0; i < count; i++) {
     const target = list[i];
     OUT_VIEW.setUint16(offset, target.numId, true);
     OUT_VIEW.setFloat32(offset + 2, target.x, true);
     OUT_VIEW.setFloat32(offset + 6, target.y, true);
-    offset += 10;
+
+    if (isFullSnapshot) {
+      OUT_VIEW.setUint8(offset + 10, target.playerId);
+      offset += 11;
+    } else {
+      offset += 10;
+    }
   }
 
   p.ws.send(new Uint8Array(OUT_BUFFER, 0, offset));
@@ -201,11 +218,21 @@ function sendLeavesBinary(p: ConnectedPlayer, leaveIds: number[]) {
 // WebSocket 伺服器監聽與二進位接收處理
 // ----------------------------------------------------------------------
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req: IncomingMessage) => {
   ws.binaryType = "arraybuffer"; // 設定接收二進位格式
 
   const numId = nextNumId++;
   if (nextNumId > 65535) nextNumId = 1; // 循環 16-bit ID
+
+  // 真實玩家帶 ?player=1~10；機器人／壓測不帶 → playerId=0
+  const query = parse(req.url || "", true).query;
+  const rawPlayer = query.player != null ? Number(query.player) : NaN;
+  const playerId =
+    Number.isFinite(rawPlayer) &&
+    rawPlayer >= 1 &&
+    rawPlayer <= 255
+      ? Math.floor(rawPlayer)
+      : 0;
 
   const { x, y } = randomSpawn();
   const gId = toGrid(x, y);
@@ -219,6 +246,7 @@ wss.on("connection", (ws) => {
     lastKnown: new Map(),
     snapOffset: numId % SNAPSHOT_TICKS,
     isAlive: true,
+    playerId,
   };
 
   players.set(numId, player);

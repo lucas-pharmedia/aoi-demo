@@ -40,7 +40,7 @@ export class PlayerManager {
     this.player = null;
   }
 
-  createPlayer(spawnPoint: Point): void {
+  createPlayer(spawnPoint: Point, textureKey?: string): void {
     this.destroyPlayer();
     const { map, navMesh } = this.scene.mapManager;
 
@@ -49,9 +49,14 @@ export class PlayerManager {
       spawnPoint = getRandomPointInNavMeshLayer(map);
     }
 
-    const player = Player.create({ scene: this.scene, spawnPoint });
+    const resolvedKey = textureKey ?? PLAYER_SPRITE_TEXTURE_KEY;
+    const player = Player.create({
+      scene: this.scene,
+      spawnPoint,
+      textureKey: resolvedKey,
+    });
     if (!player) {
-      console.error('[PlayerManager] Player.create FAILED — missing texture', PLAYER_SPRITE_TEXTURE_KEY);
+      console.error('[PlayerManager] Player.create FAILED — missing texture', resolvedKey);
       return;
     }
 

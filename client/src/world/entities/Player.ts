@@ -1,5 +1,4 @@
 import {
-  CHARACTER_SPRITE_SCALE,
   PLAYER_SPEED,
   PLAYER_SPRITE_TEXTURE_KEY,
   walkAnimKey
@@ -11,8 +10,12 @@ export class Player extends Character {
   private isKeyboardMoving = false;
   public isPathMoving = false;
 
-  private constructor(scene: WorldPlayfieldScene, sprite: Phaser.Physics.Arcade.Sprite) {
-    super({ scene, sprite, textureKey: PLAYER_SPRITE_TEXTURE_KEY, walkSpeed: PLAYER_SPEED });
+  private constructor(
+    scene: WorldPlayfieldScene,
+    sprite: Phaser.Physics.Arcade.Sprite,
+    textureKey: string
+  ) {
+    super({ scene, sprite, textureKey, walkSpeed: PLAYER_SPEED });
   }
 
   /** 是否正由鍵盤方向連續推進行走（放開後才為 false） */
@@ -24,11 +27,16 @@ export class Player extends Character {
    * 只建立角色 sprite；行走動畫由場景註冊。座標、身體、碰撞、攝影機由 {@link PlayerManager} 處理。
    * 圖集不存在時回傳 null。
    */
-  static create(options: { scene: WorldPlayfieldScene; spawnPoint: Point }): Player | null {
+  static create(options: {
+    scene: WorldPlayfieldScene;
+    spawnPoint: Point;
+    textureKey?: string;
+  }): Player | null {
     const { scene, spawnPoint } = options;
-    const sprite = Character.createScaledArcadeSprite(scene, spawnPoint, PLAYER_SPRITE_TEXTURE_KEY);
+    const textureKey = options.textureKey ?? PLAYER_SPRITE_TEXTURE_KEY;
+    const sprite = Character.createScaledArcadeSprite(scene, spawnPoint, textureKey);
     if (!sprite) return null;
-    const player = new Player(scene, sprite);
+    const player = new Player(scene, sprite, textureKey);
     Character.applyOrigin(player);
     player.setIdleFrame();
     return player;
@@ -47,7 +55,7 @@ export class Player extends Character {
     }
     this.sprite.setPosition(this.sprite.x + deltaX, this.sprite.y + deltaY);
     this.direction = facing;
-    this.sprite.play(walkAnimKey(PLAYER_SPRITE_TEXTURE_KEY, facing), true);
+    this.sprite.play(walkAnimKey(this.getTextureKey(), facing), true);
     this.isKeyboardMoving = true;
     this.isPathMoving = false;
   }

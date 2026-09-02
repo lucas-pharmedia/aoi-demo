@@ -15,6 +15,8 @@ export interface BinaryPlayerState {
   id: number;
   x: number;
   y: number;
+  /** Enter / Update 才有；Move 為 0 */
+  playerId: number;
 }
 
 interface Handlers {
@@ -41,7 +43,7 @@ let gapBuckets = { g60: 0, g100: 0, g200: 0 };
 const MAX_POOL_SIZE = 250;
 const playerObjectPool: BinaryPlayerState[] = Array.from(
   { length: MAX_POOL_SIZE },
-  () => ({ id: 0, x: 0, y: 0 })
+  () => ({ id: 0, x: 0, y: 0, playerId: 0 })
 );
 
 const reusablePlayersArray: BinaryPlayerState[] = [];
@@ -158,23 +160,27 @@ export function connect(url: string, h: Handlers): void {
       case Opcode.Update: {
         if (ev.data.byteLength < 3) return;
         const count = view.getUint16(1, true);
+        const stride =
+          opcode === Opcode.Move ? 10 : 11; // Enter/Update 多 1B playerId
 
         reusablePlayersArray.length = 0;
         let offset = 3;
 
         for (let i = 0; i < count; i++) {
-          if (offset + 10 > ev.data.byteLength) break;
+          if (offset + stride > ev.data.byteLength) break;
 
           // 🟢 使用物件池的物件，絕不產生新記憶體物件
           const p =
             playerObjectPool[i] ||
-            (playerObjectPool[i] = { id: 0, x: 0, y: 0 });
+            (playerObjectPool[i] = { id: 0, x: 0, y: 0, playerId: 0 });
           p.id = view.getUint16(offset, true);
           p.x = view.getFloat32(offset + 2, true);
           p.y = view.getFloat32(offset + 6, true);
+          p.playerId =
+            stride === 11 ? view.getUint8(offset + 10) : 0;
 
           reusablePlayersArray.push(p);
-          offset += 10;
+          offset += stride;
         }
 
         if (opcode === Opcode.Enter) handlers.onEnter(reusablePlayersArray);
