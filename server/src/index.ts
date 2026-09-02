@@ -23,10 +23,7 @@ const PORT = 8088;
 const TICK_RATE = 8; // 8 Hz
 const TICK_MS = 1000 / TICK_RATE; // 125ms
 
-// 🟢 1. 設為 0，確保任何微小的移動都會即時廣播，消除「忽快忽慢」的鋸齒突跳感
-const MOVE_THRESHOLD_SQ = 0;
-
-// 🟢 2. 將全量快照調整為 24 Ticks (約 3 秒一次)，避免每秒全量校正干擾正常的 Lerp 插值
+// 🟢  將全量快照調整為 24 Ticks (約 3 秒一次)，避免每秒全量校正干擾正常的 Lerp 插值
 const SNAPSHOT_TICKS = 24;
 
 const MAX_AOI_CAP = 100; // 視野最多顯示人數
