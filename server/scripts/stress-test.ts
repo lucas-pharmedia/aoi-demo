@@ -1,5 +1,5 @@
 /**
- * AOI 九宮格伺服器壓力測試 (極速二進位 ArrayBuffer 版 - 具備自動重連機制)
+ * AOI 九宮格伺服器壓力測試 (極速二進位 ArrayBuffer 版 - 平滑連線與心跳保活修復版)
  *
  * 模擬 N 個線上玩家（每個都像真實客戶端：連 ws → 收二進位 init → 隨機走動 → 每 50ms 送一次二進位 move），
  * 漸增人數，找出「開始卡」的臨界點。
@@ -14,44 +14,38 @@ import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { MAP_WIDTH, MAP_HEIGHT } from "../../shared/grid.ts";
 
-const envPath = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  ".env"
-);
+const envPath = path.join(path.dirname(fileURLToPath(import.meta.url)), ".env");
 if (existsSync(envPath)) {
   process.loadEnvFile(envPath);
 }
 
-/** 判斷「卡」：平均封包間隔超過此值 (ms)。正常 66.7ms (15Hz) 左右。 */
-const LAG_THRESHOLD_MS = 150;
-/** 連線後等 init 的逾時 (ms)，超過算失敗並重連 */
-const INIT_TIMEOUT_MS = 5000;
+/** 判斷「卡」：平均封包間隔超過此值 (ms)。正常 125ms (8Hz) 或 333ms (3Hz) 左右。 */
+const LAG_THRESHOLD_MS = 600;
+/** 🟢 連線後等 init 的逾時 (ms)，拉長至 10 秒，適應 3Hz 低頻率 Server 佇列 */
+const INIT_TIMEOUT_MS = 10000;
 /** 每個 bot 送 move 的節流 (ms)，跟真實 client 一致 (20/s) */
 const MOVE_INTERVAL_MS = 50;
 /** true = 常態走動；false = 集中一點 */
-const BOT_NORMAL_WALK = false;
+const BOT_NORMAL_WALK = true;
 const CLUSTER_CENTER_X = 2200;
 const CLUSTER_CENTER_Y = 2200;
 const CLUSTER_SPREAD = 600;
+
 /** 壓測上限人數 */
 const STRESS_MAX = 800;
 /** 每批新增人數 */
-const STRESS_STEP = 20;
-/** 每批新增後等待時間 (ms) */
+const STRESS_STEP = 10;
+/** 🟢 每個 Bot 建立連線的間隔 (ms)，改為 50ms，讓連線平滑穿透 3Hz / 8Hz 週期 */
+const STRESS_SPAWN_INTERVAL_MS = 50;
+/** 每批新增後等待穩定時間 (ms) */
 const STRESS_HOLD_MS = 2000;
+
 /** 壓測目標 WebSocket URL（scripts/.env 的 STRESS_URL） */
 const STRESS_URL = process.env.STRESS_URL;
 if (!STRESS_URL) {
   console.error("Missing STRESS_URL. Set it in server/scripts/.env");
   process.exit(1);
 }
-
-// ----------------------------------------------------------------------
-// Bot 全域發送專用 Buffer (9 Bytes) - 避免 Bot 端的 GC 影響測量精準度
-// ----------------------------------------------------------------------
-const botSendBuffer = new ArrayBuffer(9);
-const botSendView = new DataView(botSendBuffer);
-botSendView.setUint8(0, 2); // Opcode 2 = Move
 
 interface Bot {
   id: number;
@@ -69,6 +63,9 @@ interface Bot {
   intervalCount: number;
   initOk: boolean;
   moveTimer: ReturnType<typeof setInterval> | null;
+  // 🟢 每個 Bot 獨立的 9-Byte 發送 Buffer，避免高併發下的記憶體覆寫
+  sendBuffer: ArrayBuffer;
+  sendView: DataView;
 }
 
 class StressTest {
@@ -92,6 +89,10 @@ class StressTest {
     const ws = new WebSocket(this.url, { handshakeTimeout: 15000 });
     ws.binaryType = "arraybuffer"; // ⚠️ 必須設定為二進位模式
 
+    const sendBuffer = new ArrayBuffer(9);
+    const sendView = new DataView(sendBuffer);
+    sendView.setUint8(0, 2); // Opcode 2 = Move
+
     const bot: Bot = {
       id,
       ws,
@@ -107,6 +108,8 @@ class StressTest {
       intervalCount: 0,
       initOk: false,
       moveTimer: null,
+      sendBuffer,
+      sendView,
     };
 
     // 尋找陣列中是否已有該 id 的舊 bot 物件，重連時覆蓋以維持佇列正確
@@ -130,7 +133,6 @@ class StressTest {
       if (bot.dirTimer) clearTimeout(bot.dirTimer);
 
       try {
-        // 安全銷毀 socket，防止未連線關閉觸發 unhandled exception
         if (ws.readyState === WebSocket.CONNECTING) {
           ws.terminate();
         } else {
@@ -138,15 +140,14 @@ class StressTest {
         }
       } catch (e) {}
 
-      // 只有在尚未 Init 成功的情況下失敗，才增加 failed 計數
       if (!bot.initOk) {
         this.failed++;
       } else {
         this.connected--;
       }
 
-      // 避峰抖動延遲 (500ms ~ 1500ms 後重試)，避免瞬間重連撞牆
-      const jitterMs = 500 + Math.random() * 1000;
+      // 🟢 避峰退避延遲 (1000ms ~ 3000ms 後重試)，避免連線雪崩
+      const jitterMs = 1000 + Math.random() * 2000;
       setTimeout(() => {
         this.spawnBot(id);
       }, jitterMs);
@@ -157,6 +158,13 @@ class StressTest {
         retry();
       }
     }, INIT_TIMEOUT_MS);
+
+    // 🟢 關鍵：自動響應 Server 的 WebSocket Ping，防止被 Server 心跳踢除
+    ws.on("ping", (data) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.pong(data);
+      }
+    });
 
     // 預先抓取所有錯誤防止 Node.js 崩潰
     ws.on("error", (err) => {
@@ -235,9 +243,9 @@ class StressTest {
       bot.y = CLUSTER_CENTER_Y + (Math.random() - 0.5) * CLUSTER_SPREAD;
     }
 
-    botSendView.setFloat32(1, bot.x, true);
-    botSendView.setFloat32(5, bot.y, true);
-    bot.ws.send(botSendBuffer);
+    bot.sendView.setFloat32(1, bot.x, true);
+    bot.sendView.setFloat32(5, bot.y, true);
+    bot.ws.send(bot.sendBuffer);
   }
 
   /** 每秒取樣一次：計算吞吐 / 平均封包間隔，判斷是否卡 */
@@ -267,7 +275,7 @@ class StressTest {
     this.log(
       `players=${this.bots.length} connected=${this.connected} failed=${this.failed} ` +
         `msgs/s=${msgPerSec} perClient=${perClient} avgInterval=${intervalStr}ms${
-          notes.length ? `  <<< ${notes.join(" ")}` : ""
+          notes.length ? `   <<< ${notes.join(" ")}` : ""
         }`
     );
   }, 1000);
@@ -275,7 +283,7 @@ class StressTest {
   async run(): Promise<void> {
     this.log(`AOI Binary stress test → ${this.url}`);
     this.log(
-      `ramp: start=${this.step} step=${this.step} max=${this.max} hold=${this.holdMs}ms`
+      `ramp: start=${this.step} step=${this.step} max=${this.max} hold=${this.holdMs}ms spawnInterval=${STRESS_SPAWN_INTERVAL_MS}ms`
     );
     this.log("---");
 
@@ -284,8 +292,8 @@ class StressTest {
       const batch = Math.min(this.step, this.max - total);
       for (let i = 0; i < batch; i++) {
         this.spawnBot(total + i);
-        // 每建立一個連線停 15ms，避免壓測機 Socket 瞬間衝爆
-        await this.sleep(15);
+        // 🟢 每建立一個連線停 50ms，讓連線平滑穿透 3Hz / 8Hz 伺服器
+        await this.sleep(STRESS_SPAWN_INTERVAL_MS);
       }
       total += batch;
       // 等一批連上 + 穩定跑一個 hold 期間
