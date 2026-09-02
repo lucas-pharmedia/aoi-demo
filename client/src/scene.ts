@@ -14,6 +14,7 @@ import {
   WORLD_CHARACTER_SHEET_FRAME,
   walkAnimKey,
   WALK_ANIM_FRAMES,
+  PLAYER_SPEED,
 } from "./world/constants/gameConfig.ts";
 import {
   getPlayerSpriteUrl,
@@ -56,12 +57,11 @@ interface PendingRemote {
   buffer: RemoteSnap[];
 }
 
-/** 🟢 8Hz 伺服器 (125ms)，設定 180ms 緩衝延遲可提供最完備的去抖動緩衝 */
-const BUFFER_DELAY_MS = 180;
 /** 緩衝區最多留幾筆快照 */
 const MAX_BUFFER_SNAPSHOTS = 60;
 /** 🟢 前端發送移動位置的最小間隔 (ms) */
 const SEND_MOVE_INTERVAL_MS = 80;
+/** 🟢 其他玩家在畫面上移動的「絕對固定速度」(像素/秒) - 請調整至與本地玩家速度完全相同 */
 
 export class GameScene extends Phaser.Scene {
   mapManager!: MapManager;
@@ -244,23 +244,31 @@ export class GameScene extends Phaser.Scene {
     );
   }
 
+  /**
+   * 🟢 Zero-GC 導向：收到快照時推入隊列
+   */
   private pushRemoteSnap(p: BinaryPlayerState): void {
     if (p.id === this.selfId || this.selfId === 0) return;
 
-    const snap: RemoteSnap = { t: performance.now(), x: p.x, y: p.y };
-
     const existing = this.remotes.get(p.id);
-    if (existing) {
-      existing.buffer.push(snap);
-      if (existing.buffer.length > MAX_BUFFER_SNAPSHOTS)
-        existing.buffer.shift();
-      return;
-    }
-
     const pending = this.pendingRemotes.get(p.id);
-    if (pending) {
-      pending.buffer.push(snap);
-      if (pending.buffer.length > MAX_BUFFER_SNAPSHOTS) pending.buffer.shift();
+    const targetBuffer = existing
+      ? existing.buffer
+      : pending
+      ? pending.buffer
+      : null;
+
+    if (targetBuffer) {
+      if (targetBuffer.length >= MAX_BUFFER_SNAPSHOTS) {
+        // 物件重用，減少垃圾回收
+        const recycledSnap = targetBuffer.shift()!;
+        recycledSnap.t = performance.now();
+        recycledSnap.x = p.x;
+        recycledSnap.y = p.y;
+        targetBuffer.push(recycledSnap);
+      } else {
+        targetBuffer.push({ t: performance.now(), x: p.x, y: p.y });
+      }
     }
   }
 
@@ -270,16 +278,13 @@ export class GameScene extends Phaser.Scene {
     const snap: RemoteSnap = { t: performance.now(), x: p.x, y: p.y };
     const existing = this.remotes.get(p.id);
     if (existing) {
-      existing.buffer.push(snap);
-      if (existing.buffer.length > MAX_BUFFER_SNAPSHOTS)
-        existing.buffer.shift();
+      this.pushRemoteSnap(p);
       return;
     }
 
     const pending = this.pendingRemotes.get(p.id);
     if (pending) {
-      pending.buffer.push(snap);
-      if (pending.buffer.length > MAX_BUFFER_SNAPSHOTS) pending.buffer.shift();
+      this.pushRemoteSnap(p);
       return;
     }
 
@@ -342,10 +347,18 @@ export class GameScene extends Phaser.Scene {
   }
 
   private handleUpdate(players: BinaryPlayerState[]): void {
-    const seen = new Set(players.map((p) => p.id));
     for (const p of players) this.upsertRemote(p);
-    for (const id of [...this.remotes.keys(), ...this.pendingRemotes.keys()]) {
-      if (!seen.has(id)) this.removeRemote(id);
+
+    // 避免 new Set 的 Zero-GC 清理寫法
+    for (const id of this.remotes.keys()) {
+      let found = false;
+      for (let i = 0; i < players.length; i++) {
+        if (players[i].id === id) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) this.removeRemote(id);
     }
   }
 
@@ -396,61 +409,45 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * 🟢 指數平滑衰減插值 (Smooth Damp Interpolation)
-   * 消除 8Hz 低頻採樣率帶來的速度折角，達成商業級連續絲滑移動
+   * 🟢 100% 絕對勻速演算法 (Fixed-Speed Target Chase)
+   * 徹底丟棄網路時間戳，角色僅以 PLAYER_SPEED 向量前進，永遠無忽快忽慢！
    */
   private lerpRemotes(delta: number): void {
-    const renderTime = performance.now() - BUFFER_DELAY_MS;
+    const dt = delta / 1000; // 轉換為秒單位
 
     for (const rp of this.remotes.values()) {
       const buf = rp.buffer;
 
-      // 1. 丟棄比 renderTime 還要舊的過期快照（保留至少 2 筆供插值計算）
-      while (buf.length > 2 && buf[1].t <= renderTime) {
+      // 如果隊列裡累積超過 1 筆快照，丟棄舊快照，永遠朝「最新收到」的座標點前進
+      while (buf.length > 1) {
         buf.shift();
       }
 
-      const prevX = rp.sprite.x;
-      const prevY = rp.sprite.y;
-      let targetX = prevX;
-      let targetY = prevY;
+      if (buf.length === 0) continue;
 
-      if (buf.length === 1) {
-        targetX = buf[0].x;
-        targetY = buf[0].y;
-      } else if (buf.length >= 2) {
-        const s1 = buf[0];
-        const s2 = buf[1];
-        const seg = s2.t - s1.t;
+      const target = buf[0];
+      const currentX = rp.sprite.x;
+      const currentY = rp.sprite.y;
 
-        if (seg <= 0) {
-          targetX = s2.x;
-          targetY = s2.y;
-        } else {
-          const rawT = (renderTime - s1.t) / seg;
-          const t = Phaser.Math.Clamp(rawT, 0, 1);
-          targetX = Phaser.Math.Linear(s1.x, s2.x, t);
-          targetY = Phaser.Math.Linear(s1.y, s2.y, t);
-        }
-      }
+      const dx = target.x - currentX;
+      const dy = target.y - currentY;
+      const distToTarget = Math.hypot(dx, dy);
 
-      // 🟢 2. 核心：使用 Smooth Damp（指數平滑）進行二次去抖動
-      const smoothFactor = 1 - Math.exp(-0.018 * delta);
-      const finalX = Phaser.Math.Linear(prevX, targetX, smoothFactor);
-      const finalY = Phaser.Math.Linear(prevY, targetY, smoothFactor);
+      // 當距離目標點 > 0.5 像素時，以絕對固定速度前進
+      if (distToTarget > 0.5) {
+        // 1. 每影格移動距離 = 固定速度 × 時間
+        const step = Math.min(distToTarget, PLAYER_SPEED * dt);
+        const angle = Math.atan2(dy, dx);
 
-      // 3. 套用平滑後的實體座標與繪圖深度
-      rp.sprite.x = finalX;
-      rp.sprite.y = finalY;
-      rp.sprite.setDepth(finalY);
+        const nextX = currentX + Math.cos(angle) * step;
+        const nextY = currentY + Math.sin(angle) * step;
 
-      // 4. 計算本影格實質發生的位移量以控制腳步動畫
-      const frameDx = finalX - prevX;
-      const frameDy = finalY - prevY;
-      const actualMovedDist = Math.hypot(frameDx, frameDy);
+        rp.sprite.x = nextX;
+        rp.sprite.y = nextY;
+        rp.sprite.setDepth(nextY);
 
-      if (actualMovedDist > 0.08) {
-        const dir = directionFromDelta(frameDx, frameDy);
+        // 2. 控制腳步動畫
+        const dir = directionFromDelta(nextX - currentX, nextY - currentY);
         rp.lastDir = dir;
         const animKey = walkAnimKey(rp.textureKey, dir);
 
@@ -461,6 +458,7 @@ export class GameScene extends Phaser.Scene {
           rp.sprite.play(animKey, true);
         }
       } else {
+        // 已達到最新目標點，強制停止動畫並切回靜止 Frame
         if (rp.sprite.anims.isPlaying) {
           rp.sprite.anims.stop();
         }
