@@ -26,7 +26,7 @@ const TICK_RATE = 8; // 8 Hz
 const TICK_MS = 1000 / TICK_RATE; // 125ms
 
 // 🟢  將全量快照調整為 24 Ticks (約 3 秒一次)，避免每秒全量校正干擾正常的 Lerp 插值
-const SNAPSHOT_TICKS = 24;
+const SNAPSHOT_TICKS = 40;
 
 const MAX_AOI_CAP = 100; // 視野最多顯示人數
 const HEARTBEAT_MS = 10_000; // 10s 探活一次；連續兩輪無 pong ≈ 20s 踢除
@@ -177,8 +177,7 @@ function sendPlayerListBinary(
   OUT_VIEW.setUint16(1, count, true);
 
   let offset = 3;
-  const isFullSnapshot =
-    opcode === Opcode.Enter || opcode === Opcode.Update;
+  const isFullSnapshot = opcode === Opcode.Enter || opcode === Opcode.Update;
 
   for (let i = 0; i < count; i++) {
     const target = list[i];
@@ -228,9 +227,7 @@ wss.on("connection", (ws, req: IncomingMessage) => {
   const query = parse(req.url || "", true).query;
   const rawPlayer = query.player != null ? Number(query.player) : NaN;
   const playerId =
-    Number.isFinite(rawPlayer) &&
-    rawPlayer >= 1 &&
-    rawPlayer <= 255
+    Number.isFinite(rawPlayer) && rawPlayer >= 1 && rawPlayer <= 255
       ? Math.floor(rawPlayer)
       : 0;
 

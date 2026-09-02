@@ -243,6 +243,9 @@ export class GameScene extends Phaser.Scene {
     );
   }
 
+  /**
+   * 🟢 Zero-GC 快照推入
+   */
   private pushRemoteSnap(p: BinaryPlayerState): void {
     if (p.id === this.selfId || this.selfId === 0) return;
 
@@ -403,7 +406,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * 🟢 徹底消滅動畫重置抖動的反抖動插值 (Non-Resetting Animation Lerp)
+   * 🟢 平滑勻速與動畫防重置插值
    */
   private lerpRemotes(delta: number): void {
     const dt = delta / 1000;
@@ -411,13 +414,12 @@ export class GameScene extends Phaser.Scene {
     for (const rp of this.remotes.values()) {
       const buf = rp.buffer;
 
-      // 網路卡頓嚴重時丟棄舊包
+      // 網路卡頓時清理積壓快照
       if (buf.length > 6) {
         buf.splice(0, buf.length - 2);
       }
 
       if (buf.length === 0) {
-        // 沒有任何包時靜止，切回靜止 Frame
         if (rp.sprite.anims.isPlaying) {
           rp.sprite.anims.stop();
           const idleFrame = WALK_ANIM_FRAMES[rp.lastDir].start + 1;
@@ -467,18 +469,16 @@ export class GameScene extends Phaser.Scene {
       rp.sprite.y = nextY;
       rp.sprite.setDepth(nextY);
 
-      // 🟢 修復核心：只有真實發生 > 0.5px 的顯著位移時，才計算並更新方向，防浮點數高頻重置動畫
+      // 只有真實發生 > 0.5px 的顯著位移時才計算方向，防止浮點數高頻重置動畫
       if (Math.hypot(moveX, moveY) > 0.5) {
         const newDir = directionFromDelta(moveX, moveY);
         rp.lastDir = newDir;
 
         const animKey = walkAnimKey(rp.textureKey, newDir);
-        // 只有當前動畫 key 真的不同，或目前是靜止狀態時才重載 play()
         if (
           !rp.sprite.anims.isPlaying ||
           rp.sprite.anims.currentAnim?.key !== animKey
         ) {
-          // 第二個參數 ignoreIfPlaying 為 true：如果動畫已在播放且 key 相同，絕對不重置 Frame 0！
           rp.sprite.play(animKey, true);
         }
       }
