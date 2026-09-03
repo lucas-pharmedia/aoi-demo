@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx --env-file=.env watch src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "deploy": "rsync -avz --exclude 'node_modules' --exclude '.env' --exclude 'dist' --exclude '.dist' --exclude '.git' . mmo-test:~/mmo-test-server"
   },
   "dependencies": {
     "ws": "^8.18.0"
