@@ -23,9 +23,8 @@ import {
 
 const PORT = 8088;
 const TICK_RATE = 8; // 8 Hz
-const TICK_MS = 1000 / TICK_RATE; // 125ms
+const TICK_MS = 1000 / TICK_RATE;
 
-// 🟢  將全量快照調整為 24 Ticks (約 3 秒一次)，避免每秒全量校正干擾正常的 Lerp 插值
 const SNAPSHOT_TICKS = 40;
 
 const MAX_AOI_CAP = 100; // 視野最多顯示人數
@@ -484,7 +483,7 @@ function updateTick() {
     const avgInterval = (tickIntervalSum / tickCount).toFixed(1);
     const avgCompute = (tickComputeSum / tickCount).toFixed(1);
     console.log(
-      `[Binary-Opt 8Hz] avgInterval=${avgInterval}ms compute=${avgCompute}ms players=${players.size} bufferWarnings=${bufferedWarningCount}`
+      `[Binary-Opt ${TICK_RATE}Hz] avgInterval=${avgInterval}ms compute=${avgCompute}ms players=${players.size} bufferWarnings=${bufferedWarningCount}`
     );
     tickIntervalSum = 0;
     tickComputeSum = 0;
@@ -513,5 +512,5 @@ function gameLoop() {
 gameLoop();
 
 console.log(
-  `[Binary-Opt 8Hz] PID:${process.pid} 啟動於 port ${PORT}, AOI_CAP=${MAX_AOI_CAP}`
+  `[Binary-Opt ${TICK_RATE}Hz] PID:${process.pid} 啟動於 port ${PORT}, AOI_CAP=${MAX_AOI_CAP}`
 );

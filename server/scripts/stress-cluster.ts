@@ -1,11 +1,9 @@
 /**
- * AOI 九宮格伺服器壓力測試 (Cluster 多核心 + 62.5ms 對齊 + 400 高速平滑版)
+ * AOI 九宮格伺服器壓力測試 (Cluster 多核心 + 區域集中走動控制版)
  *
  * 特點：
- *  1. Cluster 多核心：自動按 CPU 核心數分派 Bot，解決壓測腳本單執行緒 CPU 瓶頸。
- *  2. Map<number, Bot>：O(1) 點對點查找，消除 Array.findIndex 搜尋卡頓。
- *  3. 62.5ms 發包對齊：完美契合 Server 8Hz (125ms) 採樣，打破 400ms 相位死鎖。
- *  4. 邊界反彈與擬真長走：避免撞牆 Δx=0 發呆與高頻急停煞車，Bot 移動極度滑順。
+ *  1. 可調整 BOT_NORMAL_WALK 切換全地圖巡邏或區域集中。
+ *  2. 可透過 CLUSTER_CENTER_X / Y / SPREAD 常數靈活指定壓測熱區。
  *
  * 用法：
  *   npm run stress
@@ -26,11 +24,20 @@ if (existsSync(envPath)) {
 const LAG_THRESHOLD_MS = 600;
 const INIT_TIMEOUT_MS = 10000;
 
-/** 🟢 關鍵：62.5ms (16Hz) 發包頻率，100% 契合 Server 8Hz (125ms) 採樣週期 */
+/** 🟢 62.5ms (16Hz) 發包頻率，100% 契合 Server 8Hz (125ms) 採樣週期 */
 const MOVE_INTERVAL_MS = 62.5;
 
 const STRESS_MAX = 800; // 總壓測人數
 const STRESS_SPAWN_INTERVAL_MS = 50;
+
+// ----------------------------------------------------------------------
+// 區域集中走動控制常數
+// ----------------------------------------------------------------------
+/** true = 全地圖隨機走動；false = 集中在特定區域 */
+const BOT_NORMAL_WALK = false;
+const CLUSTER_CENTER_X = 2200;
+const CLUSTER_CENTER_Y = 2200;
+const CLUSTER_SPREAD = 600; // 區域範圍 (例如 2200 ± 300 像素內)
 
 const STRESS_URL = process.env.STRESS_URL || "";
 if (!STRESS_URL) {
@@ -38,15 +45,18 @@ if (!STRESS_URL) {
   process.exit(1);
 }
 
-// 取得 CPU 邏輯核心數 (例如 Apple Silicon 8 核)
-const CPU_COUNT = availableParallelism ? availableParallelism() : 4;
+// 限制最大 Worker 數為 8，避免進程 Context Switch 開銷過大
+const rawCpus = availableParallelism ? availableParallelism() : 4;
+const CPU_COUNT = Math.min(rawCpus, 8);
 
 // ----------------------------------------------------------------------
-// 1. Primary 主進程 (負責進度控制、數據彙整與 Log 輸出)
+// 1. Primary 主進程
 // ----------------------------------------------------------------------
 if (cluster.isPrimary) {
   console.log(
-    `[Master ${process.pid}] 啟動多核心壓測，目標 Bot: ${STRESS_MAX} | 分派核心數: ${CPU_COUNT}`
+    `[Master ${
+      process.pid
+    }] 啟動多核心壓測，目標 Bot: ${STRESS_MAX} | 集中模式: ${!BOT_NORMAL_WALK} | 中心: (${CLUSTER_CENTER_X}, ${CLUSTER_CENTER_Y})`
   );
   console.log("---");
 
@@ -86,7 +96,6 @@ if (cluster.isPrimary) {
     });
   }
 
-  // Master 每秒彙總數據並印出 Log
   setInterval(() => {
     let totalConnected = 0;
     let totalFailed = 0;
@@ -122,7 +131,7 @@ if (cluster.isPrimary) {
   }, 1000);
 } else {
   // ----------------------------------------------------------------------
-  // 2. Worker 子進程 (負責各核心分派到的 Bot 模擬與發包)
+  // 2. Worker 子進程
   // ----------------------------------------------------------------------
   const myBotCount = Number(process.env.WORKER_BOT_COUNT || 100);
   const myOffsetId = Number(process.env.WORKER_OFFSET_ID || 0);
@@ -142,10 +151,9 @@ if (cluster.isPrimary) {
     initOk: boolean;
     sendBuffer: ArrayBuffer;
     sendView: DataView;
-    nextDirTime: number; // 記錄下一次隨機換向的時間戳
+    nextDirTime: number;
   }
 
-  // 🟢 使用 Map<number, Bot> 實現 O(1) 點對點查找，徹底消除 Array.findIndex 卡頓
   const bots = new Map<number, Bot>();
   let connected = 0;
   let failed = 0;
@@ -153,13 +161,9 @@ if (cluster.isPrimary) {
 
   function pickNewDirection(bot: Bot, now: number): void {
     const angle = Math.random() * Math.PI * 2;
-
-    // 🟢 保持你的 PLAYER_SPEED = 400 高速
     const speed = 400;
     bot.vx = Math.cos(angle) * speed;
     bot.vy = Math.sin(angle) * speed;
-
-    // 🟢 4 ~ 8 秒才換向一次，讓 Bot 能夠長距離直線平滑行走，避免高頻急停
     bot.nextDirTime = now + 4000 + Math.random() * 4000;
   }
 
@@ -171,9 +175,16 @@ if (cluster.isPrimary) {
     const sendView = new DataView(sendBuffer);
     sendView.setUint8(0, 2); // Opcode 2 = Move
 
-    // 離地圖邊界留出安全距離，防止出生即卡牆
-    const spawnX = Math.random() * (MAP_WIDTH - 256) + 128;
-    const spawnY = Math.random() * (MAP_HEIGHT - 256) + 128;
+    // 🟢 依據 BOT_NORMAL_WALK 決定出生點
+    let spawnX = 0;
+    let spawnY = 0;
+    if (BOT_NORMAL_WALK) {
+      spawnX = Math.random() * (MAP_WIDTH - 256) + 128;
+      spawnY = Math.random() * (MAP_HEIGHT - 256) + 128;
+    } else {
+      spawnX = CLUSTER_CENTER_X + (Math.random() - 0.5) * CLUSTER_SPREAD;
+      spawnY = CLUSTER_CENTER_Y + (Math.random() - 0.5) * CLUSTER_SPREAD;
+    }
 
     const bot: Bot = {
       id,
@@ -235,7 +246,6 @@ if (cluster.isPrimary) {
       const opcode = view.getUint8(0);
 
       if (!bot.initOk) {
-        // 🟢 對齊精簡後的 11-byte Init 協議: [1B Opcode][2B SelfId][4B X][4B Y]
         if (opcode === 1 && raw.byteLength >= 11) {
           bot.initOk = true;
           bot.selfId = view.getUint16(1, true);
@@ -260,33 +270,38 @@ if (cluster.isPrimary) {
     ws.on("close", () => retry());
   }
 
-  // 🟢 單一批次 Timer 驅動所有 Bot 移動與發包 (62.5ms)
+  // 發包主迴圈 (62.5ms)
   setInterval(() => {
     const now = Date.now();
 
     for (const bot of bots.values()) {
       if (!bot.initOk || bot.ws.readyState !== WebSocket.OPEN) continue;
 
-      // 定期切換方向
-      if (now >= bot.nextDirTime) {
-        pickNewDirection(bot, now);
-      }
+      if (BOT_NORMAL_WALK) {
+        // 常態長距離走動模式
+        if (now >= bot.nextDirTime) {
+          pickNewDirection(bot, now);
+        }
 
-      let nextX = bot.x + bot.vx * (MOVE_INTERVAL_MS / 1000);
-      let nextY = bot.y + bot.vy * (MOVE_INTERVAL_MS / 1000);
+        let nextX = bot.x + bot.vx * (MOVE_INTERVAL_MS / 1000);
+        let nextY = bot.y + bot.vy * (MOVE_INTERVAL_MS / 1000);
 
-      // 🟢 邊界自動反彈機制：400 高速撞牆時自動轉向，避免卡邊界導致 dx=0 被 Server 過濾
-      if (nextX <= 64 || nextX >= MAP_WIDTH - 64) {
-        bot.vx = -bot.vx;
-        nextX = Math.max(64, Math.min(nextX, MAP_WIDTH - 64));
-      }
-      if (nextY <= 64 || nextY >= MAP_HEIGHT - 64) {
-        bot.vy = -bot.vy;
-        nextY = Math.max(64, Math.min(nextY, MAP_HEIGHT - 64));
-      }
+        if (nextX <= 64 || nextX >= MAP_WIDTH - 64) {
+          bot.vx = -bot.vx;
+          nextX = Math.max(64, Math.min(nextX, MAP_WIDTH - 64));
+        }
+        if (nextY <= 64 || nextY >= MAP_HEIGHT - 64) {
+          bot.vy = -bot.vy;
+          nextY = Math.max(64, Math.min(nextY, MAP_HEIGHT - 64));
+        }
 
-      bot.x = nextX;
-      bot.y = nextY;
+        bot.x = nextX;
+        bot.y = nextY;
+      } else {
+        // 🟢 區域集中走動模式 (在中心點範圍內微幅隨機踱步)
+        bot.x = CLUSTER_CENTER_X + (Math.random() - 0.5) * CLUSTER_SPREAD;
+        bot.y = CLUSTER_CENTER_Y + (Math.random() - 0.5) * CLUSTER_SPREAD;
+      }
 
       bot.sendView.setFloat32(1, bot.x, true);
       bot.sendView.setFloat32(5, bot.y, true);
@@ -294,7 +309,6 @@ if (cluster.isPrimary) {
     }
   }, MOVE_INTERVAL_MS);
 
-  // 定期打包數據回報給 Primary 主進程
   setInterval(() => {
     let intervalSum = 0;
     let intervalCount = 0;
@@ -324,7 +338,6 @@ if (cluster.isPrimary) {
     }
   }, 1000);
 
-  // 啟動本 Worker 負責的 Bot 連線
   async function runWorker(): Promise<void> {
     for (let i = 0; i < myBotCount; i++) {
       spawnBot(myOffsetId + i);
