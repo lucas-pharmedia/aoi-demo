@@ -34,7 +34,7 @@ const STRESS_SPAWN_INTERVAL_MS = 50;
 // 區域集中走動控制常數
 // ----------------------------------------------------------------------
 /** true = 全地圖隨機走動；false = 集中在特定區域 */
-const BOT_NORMAL_WALK = true;
+const BOT_NORMAL_WALK = false;
 const CLUSTER_CENTER_X = 2200;
 const CLUSTER_CENTER_Y = 2200;
 const CLUSTER_SPREAD = 600; // 區域範圍 (例如 2200 ± 300 像素內)
@@ -161,10 +161,10 @@ if (cluster.isPrimary) {
 
   function pickNewDirection(bot: Bot, now: number): void {
     const angle = Math.random() * Math.PI * 2;
-    const speed = 400;
+    const speed = 400; // 走動速度與玩家設定一致
     bot.vx = Math.cos(angle) * speed;
     bot.vy = Math.sin(angle) * speed;
-    bot.nextDirTime = now + 4000 + Math.random() * 4000;
+    bot.nextDirTime = now + 2000 + Math.random() * 3000; // 每 2~5 秒切換一次方向
   }
 
   function spawnBot(id: number): void {
@@ -270,22 +270,24 @@ if (cluster.isPrimary) {
     ws.on("close", () => retry());
   }
 
-  // 發包主迴圈 (62.5ms)
+  // 🟢 發包主迴圈 (62.5ms) - 平滑走動邏輯
   setInterval(() => {
     const now = Date.now();
 
     for (const bot of bots.values()) {
       if (!bot.initOk || bot.ws.readyState !== WebSocket.OPEN) continue;
 
+      // 1. 轉向判定
+      if (now >= bot.nextDirTime) {
+        pickNewDirection(bot, now);
+      }
+
+      // 2. 依據速度計算連續軌跡的下一個座標
+      let nextX = bot.x + bot.vx * (MOVE_INTERVAL_MS / 1000);
+      let nextY = bot.y + bot.vy * (MOVE_INTERVAL_MS / 1000);
+
       if (BOT_NORMAL_WALK) {
-        // 常態長距離走動模式
-        if (now >= bot.nextDirTime) {
-          pickNewDirection(bot, now);
-        }
-
-        let nextX = bot.x + bot.vx * (MOVE_INTERVAL_MS / 1000);
-        let nextY = bot.y + bot.vy * (MOVE_INTERVAL_MS / 1000);
-
+        // 全地圖邊界反彈
         if (nextX <= 64 || nextX >= MAP_WIDTH - 64) {
           bot.vx = -bot.vx;
           nextX = Math.max(64, Math.min(nextX, MAP_WIDTH - 64));
@@ -294,14 +296,25 @@ if (cluster.isPrimary) {
           bot.vy = -bot.vy;
           nextY = Math.max(64, Math.min(nextY, MAP_HEIGHT - 64));
         }
-
-        bot.x = nextX;
-        bot.y = nextY;
       } else {
-        // 🟢 區域集中走動模式 (在中心點範圍內微幅隨機踱步)
-        bot.x = CLUSTER_CENTER_X + (Math.random() - 0.5) * CLUSTER_SPREAD;
-        bot.y = CLUSTER_CENTER_Y + (Math.random() - 0.5) * CLUSTER_SPREAD;
+        // 🟢 區域集中邊界反彈 (限制在 CLUSTER_CENTER 的 SPREAD 範圍內)
+        const minX = CLUSTER_CENTER_X - CLUSTER_SPREAD / 2;
+        const maxX = CLUSTER_CENTER_X + CLUSTER_SPREAD / 2;
+        const minY = CLUSTER_CENTER_Y - CLUSTER_SPREAD / 2;
+        const maxY = CLUSTER_CENTER_Y + CLUSTER_SPREAD / 2;
+
+        if (nextX <= minX || nextX >= maxX) {
+          bot.vx = -bot.vx;
+          nextX = Math.max(minX, Math.min(nextX, maxX));
+        }
+        if (nextY <= minY || nextY >= maxY) {
+          bot.vy = -bot.vy;
+          nextY = Math.max(minY, Math.min(nextY, maxY));
+        }
       }
+
+      bot.x = nextX;
+      bot.y = nextY;
 
       bot.sendView.setFloat32(1, bot.x, true);
       bot.sendView.setFloat32(5, bot.y, true);

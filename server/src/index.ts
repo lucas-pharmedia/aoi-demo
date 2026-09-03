@@ -22,7 +22,7 @@ import {
 } from "../../shared/grid.ts";
 
 const PORT = 8088;
-const TICK_RATE = 8; // 8 Hz
+const TICK_RATE = 3; // 8 Hz
 const TICK_MS = 1000 / TICK_RATE;
 
 const SNAPSHOT_TICKS = 40;
