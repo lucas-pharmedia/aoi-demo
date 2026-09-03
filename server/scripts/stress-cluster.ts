@@ -32,7 +32,7 @@ const MOVE_INTERVAL_MS = 62.5;
 const STRESS_MAX = 800; // 總壓測人數
 const STRESS_SPAWN_INTERVAL_MS = 50;
 
-const STRESS_URL = process.env.STRESS_URL;
+const STRESS_URL = process.env.STRESS_URL || "";
 if (!STRESS_URL) {
   console.error("Missing STRESS_URL. Set it in server/scripts/.env");
   process.exit(1);
