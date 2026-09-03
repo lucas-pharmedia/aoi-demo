@@ -37,6 +37,16 @@ import {
 } from "../../shared/grid.ts";
 import { FpsOverlay } from "./ui/fps.ts";
 
+// ----------------------------------------------------------------------
+// 🟢 伺服器同步頻率配置與動態參數導出
+// ----------------------------------------------------------------------
+/** 伺服器廣播頻率 (Hz) - 請隨時對齊伺服器的 TICK_RATE (例如 3 或 8) */
+const SERVER_TICK_RATE = 3;
+/** 伺服器廣播單次間隔時間 (ms) */
+const SERVER_TICK_MS = 1000 / SERVER_TICK_RATE;
+/** Enter 延遲顯影超時門檻 (1.25 倍 Tick 間隔)，3Hz 下約 416ms */
+const ENTER_SPAWN_TIMEOUT_MS = Math.ceil(SERVER_TICK_MS * 1.25);
+
 interface RemoteSnap {
   t: number;
   x: number;
@@ -51,10 +61,11 @@ interface RemotePlayer {
   textureKey: string;
 }
 
-/** Enter 載圖中：先收座標，texture 就緒再建 sprite */
+/** Enter 載圖 / 等待雙包對齊中：先收座標與設超時，等條件達成再建 sprite */
 interface PendingRemote {
   playerId: number;
   buffer: RemoteSnap[];
+  timerId?: number;
 }
 
 /** 緩衝區最多留幾筆快照 */
@@ -141,6 +152,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   private resetWorldForReconnect(): void {
+    for (const pending of this.pendingRemotes.values()) {
+      if (pending.timerId) clearTimeout(pending.timerId);
+    }
     for (const rp of this.remotes.values()) {
       rp.sprite.destroy();
     }
@@ -244,20 +258,14 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * 🟢 Zero-GC 快照推入
+   * 🟢 Zero-GC 快照推入與雙軌延遲顯影解鎖 (軌道 A)
    */
   private pushRemoteSnap(p: BinaryPlayerState): void {
     if (p.id === this.selfId || this.selfId === 0) return;
 
     const existing = this.remotes.get(p.id);
-    const pending = this.pendingRemotes.get(p.id);
-    const targetBuffer = existing
-      ? existing.buffer
-      : pending
-      ? pending.buffer
-      : null;
-
-    if (targetBuffer) {
+    if (existing) {
+      const targetBuffer = existing.buffer;
       if (targetBuffer.length >= MAX_BUFFER_SNAPSHOTS) {
         const recycledSnap = targetBuffer.shift()!;
         recycledSnap.t = performance.now();
@@ -267,9 +275,24 @@ export class GameScene extends Phaser.Scene {
       } else {
         targetBuffer.push({ t: performance.now(), x: p.x, y: p.y });
       }
+      return;
+    }
+
+    const pending = this.pendingRemotes.get(p.id);
+    if (pending) {
+      pending.buffer.push({ t: performance.now(), x: p.x, y: p.y });
+
+      // 🟢 軌道 A：收到第 2 包 Move 證明正在移動！立即取消超時並生成 Sprite
+      if (pending.buffer.length >= 2) {
+        if (pending.timerId) clearTimeout(pending.timerId);
+        this.spawnRemoteFromPending(p.id, pending);
+      }
     }
   }
 
+  /**
+   * 🟢 異步建立待處理玩家，註冊超時條款 (軌道 B)
+   */
   private upsertRemote(p: BinaryPlayerState): void {
     if (p.id === this.selfId || this.selfId === 0) return;
 
@@ -286,26 +309,60 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    this.pendingRemotes.set(p.id, {
+    const remoteId = p.id;
+    const pendingData: PendingRemote = {
       playerId: p.playerId,
       buffer: [snap],
-    });
+    };
 
-    const remoteId = p.id;
-    const playerId = p.playerId;
+    // 🟢 軌道 B (超時備援)：若在超時時間內都沒有第 2 包 Move，判定為靜止玩家並生成
+    pendingData.timerId = window.setTimeout(() => {
+      const pNow = this.pendingRemotes.get(remoteId);
+      if (pNow) {
+        this.spawnRemoteFromPending(remoteId, pNow);
+      }
+    }, ENTER_SPAWN_TIMEOUT_MS);
+
+    this.pendingRemotes.set(remoteId, pendingData);
+
+    // 預先載入貼圖
+    void this.ensurePlayerTextureLoaded(p.playerId);
+  }
+
+  /**
+   * 🟢 從 Pending 狀態實體化建立 Remote Player Sprite
+   */
+  private spawnRemoteFromPending(
+    remoteId: number,
+    pending: PendingRemote
+  ): void {
+    if (this.remotes.has(remoteId)) return;
+
+    const playerId = pending.playerId;
     void this.ensurePlayerTextureLoaded(playerId).then((textureKey) => {
       const pendingNow = this.pendingRemotes.get(remoteId);
-      if (!pendingNow) return;
-      this.pendingRemotes.delete(remoteId);
-      if (this.remotes.has(remoteId)) return;
+      if (!pendingNow || this.remotes.has(remoteId)) return;
 
-      const last = pendingNow.buffer[pendingNow.buffer.length - 1]!;
-      const idleFrame = WALK_ANIM_FRAMES.down.start + 1;
+      if (pendingNow.timerId) clearTimeout(pendingNow.timerId);
+      this.pendingRemotes.delete(remoteId);
+
+      const buf = pendingNow.buffer;
+      const p1 = buf[0];
+      const p2 = buf.length >= 2 ? buf[1] : p1;
+
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      const isMoving = Math.hypot(dx, dy) > 0.1;
+
+      const initialDir = isMoving ? directionFromDelta(dx, dy) : "down";
+      const animKey = walkAnimKey(textureKey, initialDir);
+
       const sprite = this.add
-        .sprite(last.x, last.y, textureKey, idleFrame)
+        .sprite(p1.x, p1.y, textureKey)
         .setScale(2)
-        .setDepth(10)
+        .setDepth(p1.y)
         .setAlpha(1);
+
       sprite.setOrigin(
         0.5,
         (WORLD_CHARACTER_SHEET_FRAME.frameHeight - 14) /
@@ -313,10 +370,17 @@ export class GameScene extends Phaser.Scene {
       );
       sprite.texture.setFilter(Phaser.Textures.FilterMode.NEAREST);
 
+      if (isMoving) {
+        sprite.play(animKey, true);
+      } else {
+        const idleFrame = WALK_ANIM_FRAMES[initialDir].start + 1;
+        sprite.setFrame(idleFrame);
+      }
+
       this.remotes.set(remoteId, {
         sprite,
-        buffer: pendingNow.buffer,
-        lastDir: "down",
+        buffer: buf,
+        lastDir: initialDir,
         leaving: false,
         textureKey,
       });
@@ -324,7 +388,12 @@ export class GameScene extends Phaser.Scene {
   }
 
   private removeRemote(id: number): void {
-    this.pendingRemotes.delete(id);
+    const pending = this.pendingRemotes.get(id);
+    if (pending) {
+      if (pending.timerId) clearTimeout(pending.timerId);
+      this.pendingRemotes.delete(id);
+    }
+
     const rp = this.remotes.get(id);
     if (!rp) return;
 
@@ -406,7 +475,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * 🟢 平滑勻速與動畫防重置插值
+   * 🟢 平滑勻速與精確動畫插值
    */
   private lerpRemotes(delta: number): void {
     const dt = delta / 1000;
@@ -428,7 +497,9 @@ export class GameScene extends Phaser.Scene {
         continue;
       }
 
-      // 起步保護水墊：靜止狀態等 2 包建立水位才動
+      // 🟢 兩全其美關鍵：只對「畫面上的靜止角色起步」實施水墊保護
+      // 如果角色目前是靜止的（沒有播放走路動畫），且 buffer 只有 1 包，
+      // 代表剛按下方向鍵啟動，強制等待第 2 包到達（建立水位）再開跑，避免暴衝急煞！
       const isStopped = !rp.sprite.anims.isPlaying;
       if (isStopped && buf.length < 2) {
         continue;
@@ -442,9 +513,12 @@ export class GameScene extends Phaser.Scene {
       const dy = target.y - currentY;
       const distToTarget = Math.hypot(dx, dy);
 
-      // 到達當前點，消耗並繼續指向下一個點
-      if (distToTarget <= 0.8) {
+      // 精確吸附門檻 0.1px
+      if (distToTarget <= 0.1) {
+        rp.sprite.x = target.x;
+        rp.sprite.y = target.y;
         buf.shift();
+
         if (buf.length === 0) {
           if (rp.sprite.anims.isPlaying) {
             rp.sprite.anims.stop();
@@ -462,15 +536,12 @@ export class GameScene extends Phaser.Scene {
       const moveX = Math.cos(angle) * step;
       const moveY = Math.sin(angle) * step;
 
-      const nextX = currentX + moveX;
-      const nextY = currentY + moveY;
+      rp.sprite.x = currentX + moveX;
+      rp.sprite.y = currentY + moveY;
+      rp.sprite.setDepth(rp.sprite.y);
 
-      rp.sprite.x = nextX;
-      rp.sprite.y = nextY;
-      rp.sprite.setDepth(nextY);
-
-      // 只有真實發生 > 0.5px 的顯著位移時才計算方向，防止浮點數高頻重置動畫
-      if (Math.hypot(moveX, moveY) > 0.5) {
+      // 動畫觸發門檻 0.05px
+      if (Math.hypot(moveX, moveY) > 0.05) {
         const newDir = directionFromDelta(moveX, moveY);
         rp.lastDir = newDir;
 
