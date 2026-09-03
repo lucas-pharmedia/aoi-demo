@@ -34,7 +34,7 @@ const STRESS_SPAWN_INTERVAL_MS = 50;
 // 區域集中走動控制常數
 // ----------------------------------------------------------------------
 /** true = 全地圖隨機走動；false = 集中在特定區域 */
-const BOT_NORMAL_WALK = false;
+const BOT_NORMAL_WALK = true;
 const CLUSTER_CENTER_X = 2200;
 const CLUSTER_CENTER_Y = 2200;
 const CLUSTER_SPREAD = 600; // 區域範圍 (例如 2200 ± 300 像素內)

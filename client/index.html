@@ -39,11 +39,65 @@
       #fps-overlay.fps-bad {
         color: #f55;
       }
+      #virtual-joystick {
+        position: absolute;
+        left: 24px;
+        bottom: 24px;
+        width: 120px;
+        height: 120px;
+        z-index: 30000;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      #virtual-joystick .vj-base {
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.12);
+        border: 2px solid rgba(255, 255, 255, 0.28);
+        box-sizing: border-box;
+      }
+      #virtual-joystick .vj-knob {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 52px;
+        height: 52px;
+        margin: -26px 0 0 -26px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.35);
+        border: 2px solid rgba(255, 255, 255, 0.55);
+        box-sizing: border-box;
+        transform: translate(0, 0);
+        pointer-events: none;
+        transition: background 0.12s ease;
+      }
+      #virtual-joystick.is-active .vj-knob {
+        background: rgba(255, 255, 255, 0.55);
+      }
+      @media (max-width: 640px) {
+        #virtual-joystick {
+          left: 16px;
+          bottom: 16px;
+          width: 108px;
+          height: 108px;
+        }
+        #virtual-joystick .vj-knob {
+          width: 46px;
+          height: 46px;
+          margin: -23px 0 0 -23px;
+        }
+      }
     </style>
   </head>
   <body>
     <div id="game"></div>
     <div id="fps-overlay">FPS: --</div>
+    <div id="virtual-joystick" aria-hidden="true">
+      <div class="vj-base"></div>
+      <div class="vj-knob"></div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

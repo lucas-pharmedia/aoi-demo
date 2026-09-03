@@ -6,13 +6,18 @@ import {
 } from '../constants/gameConfig';
 import { Player } from '../entities/Player';
 import { getRandomPointInNavMeshLayer } from '../services/navMesh';
-import { resolveKeyboardAxesFromKeyStack } from '../services/spriteWalk';
+import {
+  directionFromDelta,
+  resolveKeyboardAxesFromKeyStack
+} from '../services/spriteWalk';
+import type { JoystickAxes } from '../../ui/virtualJoystick';
 import type { Direction, Point, WorldPlayfieldScene } from '../types';
 
 export class PlayerManager {
   private player: Player | null = null;
   private cursorKeys: Phaser.Types.Input.Keyboard.CursorKeys | null = null;
   private keyStack: Direction[] = [];
+  private joystickAxes: JoystickAxes | null = null;
 
   constructor(private readonly scene: WorldPlayfieldScene) {
     scene.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
@@ -100,7 +105,12 @@ export class PlayerManager {
     sprite.setCollideWorldBounds(true);
   }
 
-  /** 點擊空地走過去；若正在鍵盤行走先停。 */
+  /** HTML 虛擬搖桿寫入；死區／放開傳 null。搖桿優先於鍵盤。 */
+  setJoystickAxes(axes: JoystickAxes | null): void {
+    this.joystickAxes = axes;
+  }
+
+  /** 點擊空地走過去；若正在鍵盤／搖桿行走先停。 */
   walkToPoint(target: Point, onComplete?: () => void): void {
     if (!this.player) return;
     if (this.player.keyboardMoveActive) {
@@ -110,14 +120,30 @@ export class PlayerManager {
   }
 
   tick(): void {
-    this.handleKeyboardMove();
+    this.handleDirectionalMove();
     this.player?.tick();
   }
 
-  private handleKeyboardMove(): void {
-    if (!this.player || !this.cursorKeys) return;
+  private resolveMoveAxes(): {
+    inputX: number;
+    inputY: number;
+    facing: Direction;
+  } | null {
+    const joy = this.joystickAxes;
+    if (joy && (joy.x !== 0 || joy.y !== 0)) {
+      return {
+        inputX: joy.x,
+        inputY: joy.y,
+        facing: directionFromDelta(joy.x, joy.y),
+      };
+    }
+    return resolveKeyboardAxesFromKeyStack(this.keyStack);
+  }
 
-    const resolved = resolveKeyboardAxesFromKeyStack(this.keyStack);
+  private handleDirectionalMove(): void {
+    if (!this.player) return;
+
+    const resolved = this.resolveMoveAxes();
     if (!resolved) {
       if (this.player.keyboardMoveActive) {
         this.player.stopKeyboardMove();

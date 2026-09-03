@@ -36,6 +36,7 @@ import {
   getSurroundingGridIds,
 } from "../../shared/grid.ts";
 import { FpsOverlay } from "./ui/fps.ts";
+import { VirtualJoystick } from "./ui/virtualJoystick.ts";
 
 // ----------------------------------------------------------------------
 // 🟢 伺服器同步頻率配置與動態參數導出
@@ -85,6 +86,7 @@ export class GameScene extends Phaser.Scene {
   private lastGridId = -1;
   private lastTotal = -1;
   private fpsOverlay!: FpsOverlay;
+  private virtualJoystick: VirtualJoystick | null = null;
   private teardownNetwork: (() => void) | null = null;
   private selfPlayerId = 0;
 
@@ -114,6 +116,9 @@ export class GameScene extends Phaser.Scene {
     this.drawStaticGrid();
     this.aoiOverlay = this.add.graphics().setDepth(25000);
     this.fpsOverlay = new FpsOverlay();
+    this.virtualJoystick = new VirtualJoystick({
+      onChange: (axes) => this.playerManager?.setJoystickAxes(axes),
+    });
 
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) =>
       this.onPointerDown(pointer)
@@ -126,6 +131,8 @@ export class GameScene extends Phaser.Scene {
       this.scale.off("resize", () =>
         this.playerManager?.recenterCameraOnPlayer()
       );
+      this.virtualJoystick?.destroy();
+      this.virtualJoystick = null;
       this.teardownNetwork?.();
       this.teardownNetwork = null;
     });
@@ -429,6 +436,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private onPointerDown(pointer: Phaser.Input.Pointer): void {
+    if (this.virtualJoystick?.isActive) return;
     const player = this.playerManager?.getPlayer();
     if (!player) return;
     const world = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
