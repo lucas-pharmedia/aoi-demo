@@ -32,9 +32,8 @@ import {
   GRID_HEIGHT,
   GRID_COLS,
   GRID_ROWS,
-  toGrid,
-  getSurroundingGridIds,
 } from "../../shared/grid.ts";
+import { toGrid, getSurroundingGridIds } from "./utils/grid.ts";
 import { FpsOverlay } from "./ui/fps.ts";
 import { VirtualJoystick } from "./ui/virtualJoystick.ts";
 

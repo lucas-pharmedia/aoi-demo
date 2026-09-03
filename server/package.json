@@ -4,8 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "dev:cluster": "tsx watch src/index-cluster.ts",
+    "dev": "tsx --env-file=.env watch src/index.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
