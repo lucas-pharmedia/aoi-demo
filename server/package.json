@@ -7,7 +7,8 @@
     "dev": "tsx watch src/index.ts",
     "dev:cluster": "tsx watch src/index-cluster.ts",
     "typecheck": "tsc --noEmit",
-    "stress": "tsx scripts/stress-test.ts"
+    "stress": "tsx scripts/stress-test.ts",
+    "stress:cluster": "tsx scripts/stress-cluster.ts"
   },
   "dependencies": {
     "ws": "^8.18.0"
