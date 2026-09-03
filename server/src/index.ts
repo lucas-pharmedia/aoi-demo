@@ -148,16 +148,14 @@ function canSendOrDrop(p: ConnectedPlayer, opcode: Opcode): boolean {
 // 二進位封包打包與發送函式 (Binary Encoders)
 // ----------------------------------------------------------------------
 
-/** 發送 Init 封包 [1B Opcode][2B SelfId][4B X][4B Y][2B MapW][2B MapH] (15 Bytes) */
+/** 發送 Init 封包 [1B Opcode][2B SelfId][4B X][4B Y] (11 Bytes) */
 function sendInitBinary(p: ConnectedPlayer) {
   if (!canSendOrDrop(p, Opcode.Init)) return;
   OUT_VIEW.setUint8(0, Opcode.Init);
   OUT_VIEW.setUint16(1, p.numId, true);
   OUT_VIEW.setFloat32(3, p.x, true);
   OUT_VIEW.setFloat32(7, p.y, true);
-  OUT_VIEW.setUint16(11, MAP_WIDTH, true);
-  OUT_VIEW.setUint16(13, MAP_HEIGHT, true);
-  p.ws.send(new Uint8Array(OUT_BUFFER, 0, 15));
+  p.ws.send(new Uint8Array(OUT_BUFFER, 0, 11));
 }
 
 /**
