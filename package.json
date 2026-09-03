@@ -3,8 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "deploy": "rsync -avz --exclude '.temp' --exclude 'node_modules' --exclude 'client' --exclude 'dist' --exclude '.git' . aoi-bench-test:~/aoi-demo",
-    "stress": "npm run stress --prefix tools",
-    "stress:cluster": "npm run stress:cluster --prefix tools"
+    "deploy": "rsync -avz --exclude '.temp' --exclude 'node_modules' --exclude 'client' --exclude 'dist' --exclude '.git' . aoi-bench-test:~/aoi-demo"
   }
 }
