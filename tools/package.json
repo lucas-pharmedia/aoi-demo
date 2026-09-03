@@ -1,12 +1,11 @@
 {
-  "name": "aoi-server",
+  "name": "aoi-tools",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "dev:cluster": "tsx watch src/index-cluster.ts",
-    "typecheck": "tsc --noEmit"
+    "stress": "tsx stress-test.ts",
+    "stress:cluster": "tsx stress-cluster.ts"
   },
   "dependencies": {
     "ws": "^8.18.0"

@@ -6,13 +6,13 @@
  *
  * 用法：
  *   npm run stress
- *   調整 scripts/.env 的 STRESS_URL，其餘常數在檔案內修改
+ *   調整 tools/.env 的 STRESS_URL，其餘常數在檔案內修改
  */
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
-import { MAP_WIDTH, MAP_HEIGHT } from "../../shared/grid.ts";
+import { MAP_WIDTH, MAP_HEIGHT } from "../shared/grid.ts";
 
 const envPath = path.join(path.dirname(fileURLToPath(import.meta.url)), ".env");
 if (existsSync(envPath)) {
@@ -40,10 +40,10 @@ const STRESS_SPAWN_INTERVAL_MS = 50;
 /** 每批新增後等待穩定時間 (ms) */
 const STRESS_HOLD_MS = 2000;
 
-/** 壓測目標 WebSocket URL（scripts/.env 的 STRESS_URL） */
+/** 壓測目標 WebSocket URL（tools/.env 的 STRESS_URL） */
 const STRESS_URL = process.env.STRESS_URL;
 if (!STRESS_URL) {
-  console.error("Missing STRESS_URL. Set it in server/scripts/.env");
+  console.error("Missing STRESS_URL. Set it in tools/.env");
   process.exit(1);
 }
 

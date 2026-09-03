@@ -14,7 +14,7 @@ import { availableParallelism } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
-import { MAP_WIDTH, MAP_HEIGHT } from "../../shared/grid.ts";
+import { MAP_WIDTH, MAP_HEIGHT } from "../shared/grid.ts";
 
 const envPath = path.join(path.dirname(fileURLToPath(import.meta.url)), ".env");
 if (existsSync(envPath)) {
@@ -34,14 +34,14 @@ const STRESS_SPAWN_INTERVAL_MS = 50;
 // 區域集中走動控制常數
 // ----------------------------------------------------------------------
 /** true = 全地圖隨機走動；false = 集中在特定區域 */
-const BOT_NORMAL_WALK = false;
+const BOT_NORMAL_WALK = true;
 const CLUSTER_CENTER_X = 2200;
 const CLUSTER_CENTER_Y = 2200;
 const CLUSTER_SPREAD = 600; // 區域範圍 (例如 2200 ± 300 像素內)
 
 const STRESS_URL = process.env.STRESS_URL || "";
 if (!STRESS_URL) {
-  console.error("Missing STRESS_URL. Set it in server/scripts/.env");
+  console.error("Missing STRESS_URL. Set it in tools/.env");
   process.exit(1);
 }
 
