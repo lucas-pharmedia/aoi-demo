@@ -23,7 +23,7 @@ import {
 } from "./config.ts";
 import { toGrid, getSurroundingGridIds } from "./utils/grid.ts";
 
-const PORT = 8088;
+const PORT = Number(process.env.PORT) || 8088;
 
 const SNAPSHOT_TICKS = 40;
 
